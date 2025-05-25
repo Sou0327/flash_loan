@@ -53,8 +53,8 @@ const CONFIG = {
   
   // 利益設定
   PROFIT: {
-    MIN_PERCENTAGE: 0.5,      // 最小利益率 0.5%（$50）
-    MIN_AMOUNT_USD: 40,       // 最小利益額 $40（ガス代を考慮）
+    MIN_PERCENTAGE: 0.5,      // 最小利益率 0.5%（元の設定）
+    MIN_AMOUNT_USD: 40,       // 最小利益額 $40（元の設定）
   },
   
   // 実行制御
@@ -71,7 +71,7 @@ const STATE = {
 };
 
 // 設定（旧設定を削除）
-const IS_TEST_MODE = false; // テストモード無効（実際の実行）
+const IS_TEST_MODE = false; // 実際の取引を実行
 
 // 0x Protocol API設定
 const apiKey = process.env.ZX_API_KEY!; // 0x APIキー
@@ -178,7 +178,7 @@ const ARB_PATHS: ArbPath[] = [
   {
     name: "PEPE -> SHIB -> PEPE",
     borrowToken: PEPE,
-    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 PEPE（現実的な額）
+    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 PEPE（元の設定）
     borrowDecimals: 18,
     targetToken: SHIB,
     targetDecimals: 18
@@ -186,7 +186,7 @@ const ARB_PATHS: ArbPath[] = [
   {
     name: "SHIB -> DOGE -> SHIB",
     borrowToken: SHIB,
-    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 SHIB（現実的な額）
+    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 SHIB（元の設定）
     borrowDecimals: 18,
     targetToken: DOGE,
     targetDecimals: 8
@@ -355,20 +355,50 @@ async function checkArbitrage() {
       );
 
       // 4. 利益が閾値を超えていれば詳細表示、そうでなければ簡潔表示
-      if (percentage > CONFIG.PROFIT.MIN_PERCENTAGE) {
+      const isStablecoin = path.borrowToken === USDC || path.borrowToken === DAI || path.borrowToken === USDT;
+      const minPercentage = isStablecoin ? CONFIG.PROFIT.MIN_PERCENTAGE : 1.5; // ミームコインは1.5%（リスク承知で下げる）
+      
+      if (percentage > minPercentage) {
         opportunitiesFound++;
         console.log(`\n🎯 ARBITRAGE OPPORTUNITY FOUND!`);
         console.log(`📊 Path: ${path.name}`);
-        console.log(`💰 Borrowing: ${ethers.formatUnits(path.borrowAmount, path.borrowDecimals)} ${path.borrowToken === USDC ? 'USDC' : path.borrowToken === DAI ? 'DAI' : 'USDT'}`);
-        console.log(`✅ Step 1: ${ethers.formatUnits(firstSwap.toAmount, path.targetToken === WETH ? 18 : path.targetToken === DAI ? 18 : 6)} ${path.targetToken === WETH ? 'WETH' : path.targetToken === DAI ? 'DAI' : path.targetToken === USDC ? 'USDC' : 'USDT'}`);
-        console.log(`✅ Step 2: ${ethers.formatUnits(secondSwap.toAmount, path.borrowDecimals)} ${path.borrowToken === USDC ? 'USDC' : path.borrowToken === DAI ? 'DAI' : 'USDT'}`);
-        console.log(`💵 Expected profit: $${profit.toFixed(2)} (${percentage.toFixed(3)}%)`);
-        console.log(`🎯 Threshold: ${CONFIG.PROFIT.MIN_PERCENTAGE}%`);
+        
+        // トークン名を正しく表示
+        const borrowTokenName = path.borrowToken === USDC ? 'USDC' : 
+                               path.borrowToken === DAI ? 'DAI' : 
+                               path.borrowToken === USDT ? 'USDT' :
+                               path.borrowToken === PEPE ? 'PEPE' :
+                               path.borrowToken === SHIB ? 'SHIB' :
+                               path.borrowToken === DOGE ? 'DOGE' :
+                               path.borrowToken === FLOKI ? 'FLOKI' : 'UNKNOWN';
+        
+        const targetTokenName = path.targetToken === WETH ? 'WETH' :
+                               path.targetToken === USDC ? 'USDC' : 
+                               path.targetToken === DAI ? 'DAI' : 
+                               path.targetToken === USDT ? 'USDT' :
+                               path.targetToken === PEPE ? 'PEPE' :
+                               path.targetToken === SHIB ? 'SHIB' :
+                               path.targetToken === DOGE ? 'DOGE' :
+                               path.targetToken === FLOKI ? 'FLOKI' : 'UNKNOWN';
+        
+        console.log(`💰 Borrowing: ${ethers.formatUnits(path.borrowAmount, path.borrowDecimals)} ${borrowTokenName}`);
+        console.log(`✅ Step 1: ${ethers.formatUnits(firstSwap.toAmount, path.targetDecimals)} ${targetTokenName}`);
+        console.log(`✅ Step 2: ${ethers.formatUnits(secondSwap.toAmount, path.borrowDecimals)} ${borrowTokenName}`);
+        
+        // ミームコインの場合はドル換算しない
+        if (isStablecoin) {
+          console.log(`💵 Expected profit: $${profit.toFixed(2)} (${percentage.toFixed(3)}%)`);
+        } else {
+          console.log(`💵 Expected profit: ${profit.toFixed(2)} ${borrowTokenName} (${percentage.toFixed(3)}%)`);
+          console.log(`⚠️  Note: Meme coin arbitrage - profit shown in token units, not USD`);
+        }
+        
+        console.log(`🎯 Threshold: ${minPercentage}%`);
         
         if (IS_TEST_MODE) {
           console.log(`⚠️  TEST MODE - monitoring only`);
         } else {
-          // 実際のアービトラージ実行
+          // 実際のアービトラージ実行（全てのトークン）
           await executeArbitrage(path, firstSwap, secondSwap, profit);
         }
         console.log(`─────────────────────────────────────────`);
@@ -397,10 +427,34 @@ async function executeArbitrage(
   expectedProfit: number
 ) {
   try {
+    // ステーブルコインかどうかを判定
+    const isStablecoin = path.borrowToken === USDC || path.borrowToken === DAI || path.borrowToken === USDT;
+    
     // 最小利益額チェック
-    if (expectedProfit < CONFIG.PROFIT.MIN_AMOUNT_USD) {
-      console.log(`⚠️  Profit too low: $${expectedProfit.toFixed(2)} < $${CONFIG.PROFIT.MIN_AMOUNT_USD}`);
-      return;
+    if (isStablecoin) {
+      if (expectedProfit < CONFIG.PROFIT.MIN_AMOUNT_USD) {
+        console.log(`⚠️  Profit too low: $${expectedProfit.toFixed(2)} < $${CONFIG.PROFIT.MIN_AMOUNT_USD}`);
+        return;
+      }
+    } else {
+      // ミームコインの場合：より高い利益率を要求（ガス代を考慮）
+      const minMemeProfit = 1.5; // 1.5%以上の利益率を要求（リスク承知で下げる）
+      const currentPercentage = (expectedProfit / Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals))) * 100;
+      
+      if (currentPercentage < minMemeProfit) {
+        console.log(`⚠️  Meme coin profit too low: ${currentPercentage.toFixed(3)}% < ${minMemeProfit}%`);
+        return;
+      }
+      
+      // 概算でガス代を上回るかチェック（保守的に$20のガス代を想定）
+      const estimatedGasCostUSD = 20;
+      const tokenName = path.borrowToken === PEPE ? 'PEPE' :
+                       path.borrowToken === SHIB ? 'SHIB' :
+                       path.borrowToken === DOGE ? 'DOGE' :
+                       path.borrowToken === FLOKI ? 'FLOKI' : 'UNKNOWN';
+      
+      console.log(`⚠️  Meme coin arbitrage: ${expectedProfit.toFixed(2)} ${tokenName} profit vs ~$${estimatedGasCostUSD} gas cost`);
+      console.log(`⚠️  Proceeding with caution - profit may not cover gas costs`);
     }
 
     console.log(`🚀 Executing arbitrage for ${path.name}...`);
@@ -453,20 +507,30 @@ async function executeArbitrage(
       console.log(`✅ Arbitrage successful!`);
       console.log(`   - Block: ${receipt.blockNumber}`);
       console.log(`   - Gas used: ${receipt.gasUsed.toString()}`);
-      console.log(`   - Expected profit: $${expectedProfit.toFixed(2)}`);
       
       // 実際の利益を計算（ガス代を差し引く）
       const gasUsed = receipt.gasUsed * receipt.gasPrice;
       const gasCostUSD = Number(gasUsed) / 1e18 * 3000; // ETH価格を$3000と仮定
-      const netProfit = expectedProfit - gasCostUSD;
       
-      console.log(`   - Gas cost: $${gasCostUSD.toFixed(2)}`);
-      console.log(`   - Net profit: $${netProfit.toFixed(2)}`);
-      
-      // 状態更新
-      STATE.totalProfit += netProfit;
-      
-      console.log(`📊 Total profit: $${STATE.totalProfit.toFixed(2)}`);
+      if (isStablecoin) {
+        console.log(`   - Expected profit: $${expectedProfit.toFixed(2)}`);
+        const netProfit = expectedProfit - gasCostUSD;
+        console.log(`   - Gas cost: $${gasCostUSD.toFixed(2)}`);
+        console.log(`   - Net profit: $${netProfit.toFixed(2)}`);
+        
+        // 状態更新
+        STATE.totalProfit += netProfit;
+        console.log(`📊 Total profit: $${STATE.totalProfit.toFixed(2)}`);
+      } else {
+        // ミームコインの場合
+        const tokenName = path.borrowToken === PEPE ? 'PEPE' :
+                         path.borrowToken === SHIB ? 'SHIB' :
+                         path.borrowToken === DOGE ? 'DOGE' :
+                         path.borrowToken === FLOKI ? 'FLOKI' : 'UNKNOWN';
+        console.log(`   - Expected profit: ${expectedProfit.toFixed(2)} ${tokenName}`);
+        console.log(`   - Gas cost: $${gasCostUSD.toFixed(2)}`);
+        console.log(`   - Note: Meme coin profit not converted to USD`);
+      }
     } else {
       console.log(`❌ Transaction failed`);
     }
