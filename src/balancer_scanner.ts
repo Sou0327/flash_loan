@@ -11,7 +11,7 @@ const VALID_PRIVATE_KEY = PRIVATE_KEY && PRIVATE_KEY.length === 66 ? PRIVATE_KEY
 // プロバイダーとウォレットの設定
 const RPC_URL = process.env.ALCHEMY_WSS?.replace('wss://', 'https://') || process.env.MAINNET_RPC;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const signer = new ethers.Wallet(VALID_PRIVATE_KEY, provider);
+const wallet = new ethers.Wallet(VALID_PRIVATE_KEY, provider);
 
 // コントラクトアドレス
 const BALANCER_FLASH_ARB = "0x461C5a2F120DCBD136aA33020967dB5C5f777f6a";
@@ -30,7 +30,7 @@ const abi = [
   "function withdraw(address token) external"
 ];
 
-const flashArb = new ethers.Contract(BALANCER_FLASH_ARB, abi, signer);
+const flashArb = new ethers.Contract(BALANCER_FLASH_ARB, abi, wallet);
 
 // 最適化された設定
 const CONFIG = {
@@ -46,7 +46,7 @@ const CONFIG = {
   GAS: {
     LIMIT: 400000n,           // 実測値に基づく
     MAX_PRICE_GWEI: 20,       // より現実的な値
-    PRIORITY_FEE_GWEI: 2,     // 優先料金
+    PRIORITY_FEE_GWEI: 1.5,   // MEV保護用の優先料金
   },
   
   // 利益設定（動的計算）
@@ -59,13 +59,21 @@ const CONFIG = {
   EXECUTION: {
     CHECK_INTERVAL_BLOCKS: 3, // 3ブロックごとにチェック
     MAX_SLIPPAGE: 1,          // 最大スリッページ 1%
+  },
+  
+  MONITORING: {
+    BLOCK_INTERVAL: 3,        // 3ブロックごとにスキャン
+    MAX_SLIPPAGE_PERCENT: 0.5, // 最大スリッページ
   }
 };
 
 // 実行状態管理（シンプル化）
 const STATE = {
   totalProfit: 0,
-  startTime: Date.now()
+  totalTransactions: 0,
+  successfulTransactions: 0,
+  lastBlockNumber: 0,
+  startTime: Date.now(),
 };
 
 // 設定（旧設定を削除）
@@ -168,6 +176,30 @@ const ARB_PATHS: ArbPath[] = [
     targetDecimals: 8
   }
 ];
+
+// 価格フィード関数
+async function getTokenPriceUSD(tokenAddress: string): Promise<number> {
+  // 簡易価格マッピング（実際の実装ではChainlink Oracleを使用）
+  const priceMap: { [key: string]: number } = {
+    [USDC]: 1.0,
+    [DAI]: 1.0,
+    [USDT]: 1.0,
+    [WETH]: 3000, // 動的に取得すべき
+    [WBTC]: 60000, // 動的に取得すべき
+  };
+  
+  return priceMap[tokenAddress.toLowerCase()] || 1.0;
+}
+
+// スリッページチェック関数
+function checkSlippage(
+  borrowAmount: bigint,
+  returnAmount: bigint,
+  maxSlippagePercent: number = 0.5
+): boolean {
+  const slippage = Number(borrowAmount - returnAmount) / Number(borrowAmount) * 100;
+  return Math.abs(slippage) <= maxSlippagePercent;
+}
 
 // 動的な最小利益率の計算
 function calculateMinProfitPercentage(gasPriceGwei: number, borrowAmount: number): number {
@@ -347,11 +379,15 @@ async function checkArbitrage() {
         path.borrowDecimals
       );
 
+      // 3.1. スリッページチェック
+      if (!checkSlippage(path.borrowAmount, secondSwap.toAmount, 0.5)) {
+        console.log(`⚠️  ${path.name}: High slippage detected (>0.5%), skipping`);
+        continue;
+      }
+
       // 4. 動的な最小利益率を計算
-      const borrowAmountUSD = Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)) * 
-        (path.borrowToken === USDC || path.borrowToken === DAI || path.borrowToken === USDT ? 1 : 
-         path.borrowToken === WETH ? 3000 : 
-         path.borrowToken === WBTC ? 60000 : 1);
+      const tokenPrice = await getTokenPriceUSD(path.borrowToken);
+      const borrowAmountUSD = Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)) * tokenPrice;
       
       const minPercentage = calculateMinProfitPercentage(gasPriceGwei, borrowAmountUSD);
       
@@ -414,6 +450,12 @@ async function executeArbitrage(
   try {
     console.log(`🚀 Executing arbitrage for ${path.name}...`);
     
+    // 事前チェック：スリッページ再確認
+    if (!checkSlippage(path.borrowAmount, secondSwap.toAmount, 0.5)) {
+      console.log(`⚠️  Pre-execution slippage check failed, aborting`);
+      return;
+    }
+    
     // ガス価格チェック
     const feeData = await provider.getFeeData();
     const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
@@ -430,7 +472,16 @@ async function executeArbitrage(
       return;
     }
 
+    // 利益がガス代を十分上回るかチェック
+    const estimatedGasCost = Number(CONFIG.GAS.LIMIT) * gasPriceGwei / 1e9 * 3000; // USD
+    if (expectedProfit < estimatedGasCost * 2) {
+      console.log(`⚠️  Profit too low vs gas cost: $${expectedProfit.toFixed(2)} vs $${estimatedGasCost.toFixed(2)}`);
+      return;
+    }
+
     console.log(`⛽ Gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
+    console.log(`💰 Expected profit: $${expectedProfit.toFixed(2)}`);
+    console.log(`⛽ Estimated gas cost: $${estimatedGasCost.toFixed(2)}`);
 
     // フラッシュローンを実行
     const tokens = [path.borrowToken];
@@ -442,13 +493,19 @@ async function executeArbitrage(
       [firstSwap.target, firstSwap.calldata, secondSwap.target, secondSwap.calldata]
     );
     
+    // MEV保護：優先料金を動的に調整
+    const priorityFee = Math.max(
+      CONFIG.GAS.PRIORITY_FEE_GWEI,
+      gasPriceGwei * 0.1 // ベースガス価格の10%
+    );
+    
     const tx = await flashArb.executeFlashLoan(
       tokens,
       amounts,
       userData,
       {
         maxFeePerGas: feeData.maxFeePerGas,
-        maxPriorityFeePerGas: ethers.parseUnits(CONFIG.GAS.PRIORITY_FEE_GWEI.toString(), "gwei"),
+        maxPriorityFeePerGas: ethers.parseUnits(priorityFee.toString(), "gwei"),
         gasLimit: CONFIG.GAS.LIMIT
       }
     );
@@ -456,65 +513,110 @@ async function executeArbitrage(
     console.log(`📜 Transaction sent: ${tx.hash}`);
     console.log(`⏳ Waiting for confirmation...`);
     
+    // トランザクション数をカウント
+    STATE.totalTransactions++;
+    
     const receipt = await tx.wait();
     
     if (receipt.status === 1) {
+      STATE.successfulTransactions++; // 成功カウント
       console.log(`✅ Arbitrage successful!`);
       console.log(`   - Block: ${receipt.blockNumber}`);
       console.log(`   - Gas used: ${receipt.gasUsed.toString()}`);
+      console.log(`   - Effective gas price: ${ethers.formatUnits(receipt.gasPrice, "gwei")} Gwei`);
       
       // 実際の利益を計算（ガス代を差し引く）
       const gasUsed = receipt.gasUsed * receipt.gasPrice;
       const gasCostUSD = Number(gasUsed) / 1e18 * 3000; // ETH価格を$3000と仮定
       
-      console.log(`   - Expected profit: $${expectedProfit.toFixed(2)}`);
       const netProfit = expectedProfit - gasCostUSD;
-      console.log(`   - Gas cost: $${gasCostUSD.toFixed(2)}`);
+      console.log(`   - Expected profit: $${expectedProfit.toFixed(2)}`);
+      console.log(`   - Actual gas cost: $${gasCostUSD.toFixed(2)}`);
       console.log(`   - Net profit: $${netProfit.toFixed(2)}`);
       
-      // 状態更新
+      // 成功率の追跡
       STATE.totalProfit += netProfit;
       console.log(`📊 Total profit: $${STATE.totalProfit.toFixed(2)}`);
+      
+      // パフォーマンス分析
+      const efficiency = (netProfit / gasCostUSD) * 100;
+      console.log(`📈 Efficiency: ${efficiency.toFixed(1)}% (profit/gas ratio)`);
+      
     } else {
-      console.log(`❌ Transaction failed`);
+      console.log(`❌ Transaction failed - status: ${receipt.status}`);
+      console.log(`   - Gas used: ${receipt.gasUsed.toString()} (wasted)`);
     }
     
   } catch (error) {
     console.error(`❌ Arbitrage execution failed:`, error);
+    
+    // エラーの詳細分析
+    if (error instanceof Error) {
+      if (error.message.includes("insufficient funds")) {
+        console.error("💸 Insufficient ETH balance for gas");
+      } else if (error.message.includes("replacement transaction underpriced")) {
+        console.error("⛽ Gas price too low, transaction replaced");
+      } else if (error.message.includes("execution reverted")) {
+        console.error("🔄 Contract execution reverted - likely slippage or insufficient profit");
+      }
+    }
   }
 }
 
-// メイン処理
+// メイン実行関数
 async function main() {
-  console.log("🔍 Balancer Flash Loan Arbitrage Scanner Started");
-  console.log(`📍 Contract: ${BALANCER_FLASH_ARB} (${IS_TEST_MODE ? 'TEST MODE' : 'LIVE MODE'})`);
-  console.log(`📊 Min Profit: Dynamic calculation based on gas price`);
-  console.log(`💰 Borrow Amount: $30,000 USDC/DAI, 10 WETH, 1 WBTC`);
-  console.log(`⛽ Max Gas: ${CONFIG.GAS.MAX_PRICE_GWEI} Gwei (limit: ${CONFIG.GAS.LIMIT.toString()})`);
-  console.log(`💸 Expected gas cost: ~$8-16 (dynamic threshold)`);
-  console.log(`🔄 Checking paths:`);
-  ARB_PATHS.forEach(path => console.log(`   - ${path.name}`));
-  console.log("");
-
-  // 初回チェック
-  await checkArbitrage();
-
-  // ブロック監視
-  let blockCount = 0;
+  console.log("🔍 Balancer Flash Loan Arbitrage Scanner Starting...");
+  console.log(`📊 Configuration:`);
+  console.log(`   - Contract: ${BALANCER_FLASH_ARB}`);
+  console.log(`   - Max Gas Price: ${CONFIG.GAS.MAX_PRICE_GWEI} Gwei`);
+  console.log(`   - Min Profit: ${CONFIG.PROFIT.MIN_PERCENTAGE}%`);
+  console.log(`   - Max Slippage: ${CONFIG.MONITORING.MAX_SLIPPAGE_PERCENT}%`);
+  console.log(`   - Block Interval: ${CONFIG.MONITORING.BLOCK_INTERVAL}`);
+  console.log(`   - Mode: ${IS_TEST_MODE ? "TEST" : "LIVE"} 🔴`);
+  
+  // 初期残高表示
+  const balance = await provider.getBalance(wallet.address);
+  console.log(`💰 Wallet Balance: ${ethers.formatEther(balance)} ETH`);
+  
+  STATE.startTime = Date.now();
+  
+  // ブロック監視開始
   provider.on("block", async (blockNumber) => {
-    blockCount++;
-    // 3ブロックごとにチェック（負荷軽減）
-    if (blockCount % CONFIG.EXECUTION.CHECK_INTERVAL_BLOCKS === 0) {
-      console.log(`\n⛓️  Block ${blockNumber}`);
-      await checkArbitrage();
+    try {
+      // 3ブロックごとにスキャン
+      if (blockNumber % CONFIG.MONITORING.BLOCK_INTERVAL === 0) {
+        STATE.lastBlockNumber = blockNumber;
+        
+        // パフォーマンス統計を定期的に表示
+        if (blockNumber % 30 === 0) { // 10分ごと（30ブロック）
+          displayPerformanceStats();
+        }
+        
+        await checkArbitrage();
+      }
+    } catch (error) {
+      console.error(`❌ Error in block ${blockNumber}:`, error);
     }
   });
+  
+  console.log("👀 Monitoring blocks for arbitrage opportunities...");
+}
 
-  // エラー時の再接続
-  provider.on("error", (error) => {
-    console.error("Provider error:", error);
-    process.exit(1);
-  });
+// パフォーマンス統計表示
+function displayPerformanceStats() {
+  const runtime = (Date.now() - STATE.startTime) / 1000 / 60; // 分
+  const successRate = STATE.totalTransactions > 0 ? 
+    (STATE.successfulTransactions / STATE.totalTransactions * 100) : 0;
+  
+  console.log("\n📊 === PERFORMANCE STATISTICS ===");
+  console.log(`⏱️  Runtime: ${runtime.toFixed(1)} minutes`);
+  console.log(`📈 Total Profit: $${STATE.totalProfit.toFixed(2)}`);
+  console.log(`🔢 Total Transactions: ${STATE.totalTransactions}`);
+  console.log(`✅ Successful: ${STATE.successfulTransactions}`);
+  console.log(`📊 Success Rate: ${successRate.toFixed(1)}%`);
+  console.log(`💰 Profit/Hour: $${(STATE.totalProfit / runtime * 60).toFixed(2)}`);
+  console.log(`🧱 Last Block: ${STATE.lastBlockNumber}`);
+  console.log("================================\n");
 }
 
 main().catch((e) => {

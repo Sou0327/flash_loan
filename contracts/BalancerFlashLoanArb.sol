@@ -61,12 +61,12 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         if (msg.sender != address(vault)) revert Unauthorized();
 
         // 単一トークンのアービトラージを想定
-        IERC20 token = tokens[0];
-        uint256 amount = amounts[0];
+        IERC20 cachedToken = tokens[0]; // ガス最適化：storage読み取り削減
+        uint256 cachedAmount = amounts[0];
         uint256 feeAmount = feeAmounts[0];
 
         // 開始時の残高を記録
-        uint256 balanceBefore = token.balanceOf(address(this));
+        uint256 balanceBefore = cachedToken.balanceOf(address(this));
 
         // userDataから0x APIのスワップデータをデコード
         // 新しい形式：[swapTarget1, swapData1, swapTarget2, swapData2]
@@ -78,63 +78,71 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         ) = abi.decode(userData, (address, bytes, address, bytes));
 
         // 最初のスワップのためにPermit2への承認
-        require(token.approve(PERMIT2_CONTRACT, amount), "Approval failed");
+        require(
+            cachedToken.approve(PERMIT2_CONTRACT, cachedAmount),
+            "Approval failed"
+        );
 
         // 最初のスワップを実行（例：USDC → 中間トークン）
         (bool success1, ) = swapTarget1.call(swapData1);
         if (!success1) revert SwapFailed();
 
-        // 全てのERC20トークンの残高をチェックして、0以外のものを承認
-        // これにより中間トークンのハードコードを回避
-        address[10] memory commonTokens = [
-            0x6B175474E89094C44Da98b954EedeAC495271d0F, // DAI
-            0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, // WETH
-            0xdAC17F958D2ee523a2206206994597C13D831ec7, // USDT
-            0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, // WBTC
-            0x6982508145454Ce325dDbE47a25d4ec3d2311933, // PEPE
-            0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE, // SHIB
-            0x4206931337dc273a630d328dA6441786BfaD668f, // DOGE
-            0xcf0C122c6b73ff809C693DB761e7BaeBe62b6a2E, // FLOKI
-            address(0), // 空のスロット
-            address(0) // 空のスロット
-        ];
-
-        for (uint256 i = 0; i < commonTokens.length; i++) {
-            if (commonTokens[i] == address(0)) continue;
-            if (commonTokens[i] == address(token)) continue; // 元のトークンはスキップ
-
-            IERC20 intermediateToken = IERC20(commonTokens[i]);
-            uint256 intermediateBalance = intermediateToken.balanceOf(
-                address(this)
-            );
-
-            if (intermediateBalance > 0) {
-                require(
-                    intermediateToken.approve(
-                        PERMIT2_CONTRACT,
-                        intermediateBalance
-                    ),
-                    "Intermediate approval failed"
-                );
-            }
-        }
+        // 効率化：スワップ後に実際に受け取ったトークンのみを承認
+        _approveIntermediateTokens(cachedToken);
 
         // 2番目のスワップを実行（中間トークン → 元のトークン）
         (bool success2, ) = swapTarget2.call(swapData2);
         if (!success2) revert SwapFailed();
 
         // スワップ後の残高
-        uint256 balanceAfter = token.balanceOf(address(this));
+        uint256 balanceAfter = cachedToken.balanceOf(address(this));
+
+        // スリッページチェック（最小99.5%のリターンを要求）
+        uint256 minExpectedReturn = balanceBefore + (cachedAmount * 995) / 1000;
+        if (balanceAfter < minExpectedReturn) revert InsufficientProfit();
 
         // 利益があることを確認（Balancerは手数料無料）
-        if (balanceAfter <= balanceBefore + amount) revert InsufficientProfit();
+        if (balanceAfter <= balanceBefore + cachedAmount)
+            revert InsufficientProfit();
 
         // Balancer Vaultへ返済
-        require(token.transfer(address(vault), amount), "Transfer failed");
+        require(
+            cachedToken.transfer(address(vault), cachedAmount),
+            "Transfer failed"
+        );
 
         // 利益を計算してイベントを発行
-        uint256 profit = balanceAfter - (balanceBefore + amount);
-        emit FlashLoanExecuted(address(token), amount, 0, profit);
+        uint256 profit = balanceAfter - (balanceBefore + cachedAmount);
+        emit FlashLoanExecuted(address(cachedToken), cachedAmount, 0, profit);
+    }
+
+    /// @notice 効率的な中間トークン承認
+    /// @param borrowToken 借入トークン（承認対象外）
+    function _approveIntermediateTokens(IERC20 borrowToken) internal {
+        // 主要トークンのみをチェック（ガス効率化）
+        address[5] memory majorTokens = [
+            0x6B175474E89094C44Da98b954EedeAC495271d0F, // DAI
+            0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, // WETH
+            0xdAC17F958D2ee523a2206206994597C13D831ec7, // USDT
+            0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, // WBTC
+            0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 // USDC
+        ];
+
+        for (uint256 i = 0; i < majorTokens.length; i++) {
+            if (majorTokens[i] == address(borrowToken)) continue; // 元のトークンはスキップ
+
+            IERC20 intermediateToken = IERC20(majorTokens[i]);
+            uint256 balance = intermediateToken.balanceOf(address(this));
+
+            if (balance > 0) {
+                // 残高がある場合のみ承認（ガス効率化）
+                require(
+                    intermediateToken.approve(PERMIT2_CONTRACT, balance),
+                    "Intermediate approval failed"
+                );
+                break; // 最初に見つかった中間トークンのみ承認（通常は1つだけ）
+            }
+        }
     }
 
     /// @notice トークンを引き出す
