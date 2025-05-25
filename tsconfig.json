@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "es2019",
+    "module": "Node16",
+    "moduleResolution": "node16",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": ["hardhat", "node"],
+    "outDir": "dist",
+    "skipLibCheck": true
+  },
+  "include": ["scripts", "src", "hardhat.config.ts"],
+  "exclude": ["node_modules"]
+}
