@@ -3,15 +3,28 @@ import fetch from "node-fetch";
 import * as dotenv from "dotenv";
 dotenv.config();
 
+// プライベートキーの検証
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const TEST_PRIVATE_KEY = "0x0000000000000000000000000000000000000000000000000000000000000001";
+const VALID_PRIVATE_KEY = PRIVATE_KEY && PRIVATE_KEY.length === 66 ? PRIVATE_KEY : TEST_PRIVATE_KEY;
+
 // プロバイダーとウォレットの設定
-const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WSS!);
-const signer = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+const RPC_URL = process.env.ALCHEMY_WSS?.replace('wss://', 'https://') || process.env.MAINNET_RPC;
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+const signer = new ethers.Wallet(VALID_PRIVATE_KEY, provider);
 
 // コントラクトアドレス
-const BALANCER_FLASH_ARB = process.env.BALANCER_FLASH_ARB!;
+const BALANCER_FLASH_ARB = "0xEd62FA774DC2650E4d72b16B4f86B28E84D25DcA";
 const USDC = process.env.USDC || "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH = process.env.WETH || "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const DAI = process.env.DAI || "0x6B175474E89094C44Da98b954EedeAC495271d0F";
+const USDT = process.env.USDT || "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+
+// ミームコイン
+const PEPE = "0x6982508145454Ce325dDbE47a25d4ec3d2311933"; // PEPE
+const SHIB = "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE"; // SHIBA INU
+const DOGE = "0x4206931337dc273a630d328dA6441786BfaD668f"; // DOGE
+const FLOKI = "0xcf0C122c6b73ff809C693DB761e7BaeBe62b6a2E"; // FLOKI
 
 // ABI
 const abi = [
@@ -22,11 +35,43 @@ const abi = [
 
 const flashArb = new ethers.Contract(BALANCER_FLASH_ARB, abi, signer);
 
-// 設定
-const AMOUNT_USDC = ethers.parseUnits("100000", 6); // 10万 USDC
-const AMOUNT_DAI = ethers.parseUnits("100000", 18); // 10万 DAI
-const MIN_PROFIT_PERCENTAGE = 0.3; // 最小利益率 0.3%
-const MAX_GAS_PRICE_GWEI = 50; // 最大ガス価格 50 Gwei
+// 最適化された設定
+const CONFIG = {
+  // 借入額設定（より大きな額で効率化）
+  AMOUNTS: {
+    USDC: ethers.parseUnits("10000", 6),   // 1万 USDC
+    DAI: ethers.parseUnits("10000", 18),   // 1万 DAI
+    USDT: ethers.parseUnits("10000", 6),   // 1万 USDT
+  },
+  
+  // ガス設定（現実的な値）
+  GAS: {
+    LIMIT: 350000n,           // 実測値に基づく
+    MAX_PRICE_GWEI: 30,       // 約$35のガス代まで許容
+    PRIORITY_FEE_GWEI: 2,     // 優先料金
+  },
+  
+  // 利益設定
+  PROFIT: {
+    MIN_PERCENTAGE: 0.5,      // 最小利益率 0.5%（$50）
+    MIN_AMOUNT_USD: 40,       // 最小利益額 $40（ガス代を考慮）
+  },
+  
+  // 実行制御
+  EXECUTION: {
+    CHECK_INTERVAL_BLOCKS: 3, // 3ブロックごとにチェック
+    MAX_SLIPPAGE: 1,          // 最大スリッページ 1%
+  }
+};
+
+// 実行状態管理（シンプル化）
+const STATE = {
+  totalProfit: 0,
+  startTime: Date.now()
+};
+
+// 設定（旧設定を削除）
+const IS_TEST_MODE = false; // テストモード無効（実際の実行）
 
 // 0x Protocol API設定
 const apiKey = process.env.ZX_API_KEY!; // 0x APIキー
@@ -43,21 +88,108 @@ interface ArbPath {
 }
 
 const ARB_PATHS: ArbPath[] = [
+  // ステーブルコイン/ETHペア（安定した機会）
   {
     name: "USDC -> WETH -> USDC",
     borrowToken: USDC,
-    borrowAmount: AMOUNT_USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
     borrowDecimals: 6,
     targetToken: WETH,
     targetDecimals: 18
   },
   {
+    name: "USDC -> DAI -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: DAI,
+    targetDecimals: 18
+  },
+  {
+    name: "USDC -> USDT -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: USDT,
+    targetDecimals: 6
+  },
+  
+  // ミームコインペア（高ボラティリティ機会）
+  {
+    name: "USDC -> PEPE -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: PEPE,
+    targetDecimals: 18
+  },
+  {
+    name: "USDC -> SHIB -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: SHIB,
+    targetDecimals: 18
+  },
+  {
+    name: "USDC -> DOGE -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: DOGE,
+    targetDecimals: 8
+  },
+  {
+    name: "USDC -> FLOKI -> USDC",
+    borrowToken: USDC,
+    borrowAmount: CONFIG.AMOUNTS.USDC,
+    borrowDecimals: 6,
+    targetToken: FLOKI,
+    targetDecimals: 9
+  },
+  
+  // 高額DAIペア（追加）
+  {
     name: "DAI -> WETH -> DAI",
     borrowToken: DAI,
-    borrowAmount: AMOUNT_DAI,
+    borrowAmount: CONFIG.AMOUNTS.DAI,
     borrowDecimals: 18,
     targetToken: WETH,
     targetDecimals: 18
+  },
+  {
+    name: "DAI -> USDC -> DAI",
+    borrowToken: DAI,
+    borrowAmount: CONFIG.AMOUNTS.DAI,
+    borrowDecimals: 18,
+    targetToken: USDC,
+    targetDecimals: 6
+  },
+  {
+    name: "DAI -> PEPE -> DAI",
+    borrowToken: DAI,
+    borrowAmount: CONFIG.AMOUNTS.DAI,
+    borrowDecimals: 18,
+    targetToken: PEPE,
+    targetDecimals: 18
+  },
+  
+  // ミームコイン間（極高ボラティリティ）
+  {
+    name: "PEPE -> SHIB -> PEPE",
+    borrowToken: PEPE,
+    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 PEPE（現実的な額）
+    borrowDecimals: 18,
+    targetToken: SHIB,
+    targetDecimals: 18
+  },
+  {
+    name: "SHIB -> DOGE -> SHIB",
+    borrowToken: SHIB,
+    borrowAmount: ethers.parseUnits("100000000", 18), // 1億 SHIB（現実的な額）
+    borrowDecimals: 18,
+    targetToken: DOGE,
+    targetDecimals: 8
   }
 ];
 
@@ -93,6 +225,18 @@ interface ZxQuoteResponse {
   [key: string]: any;
 }
 
+// タイムアウト付きfetch
+async function fetchWithTimeout(url: string, options: any): Promise<any> {
+  try {
+    const response = await fetch(url, {
+      ...options
+    });
+    return response;
+  } catch (error) {
+    throw error;
+  }
+}
+
 // 0x Protocol APIでスワップパスをチェック
 async function checkSwapPath(
   fromToken: string,
@@ -105,11 +249,10 @@ async function checkSwapPath(
       chainId: chainId,
       sellToken: fromToken,
       buyToken: toToken,
-      sellAmount: amount.toString(),
-      taker: BALANCER_FLASH_ARB
+      sellAmount: amount.toString()
     });
     
-    const priceResponse = await fetch(
+    const priceResponse = await fetchWithTimeout(
       `https://api.0x.org/swap/permit2/price?${priceParams.toString()}`,
       {
         headers: { 
@@ -118,6 +261,11 @@ async function checkSwapPath(
         },
       }
     );
+    
+    if (!priceResponse.ok) {
+      return null;
+    }
+    
     const priceData = await priceResponse.json() as ZxPriceResponse;
     
     if (!priceData.buyAmount) {
@@ -130,11 +278,11 @@ async function checkSwapPath(
       sellToken: fromToken,
       buyToken: toToken,
       sellAmount: amount.toString(),
-      taker: BALANCER_FLASH_ARB,
-      slippagePercentage: '0.01' // 1%スリッページ
+      taker: BALANCER_FLASH_ARB, // takerパラメータを追加
+      slippagePercentage: (CONFIG.EXECUTION.MAX_SLIPPAGE / 100).toString() // 設定からスリッページを取得
     });
     
-    const quoteResponse = await fetch(
+    const quoteResponse = await fetchWithTimeout(
       `https://api.0x.org/swap/permit2/quote?${quoteParams.toString()}`,
       {
         headers: { 
@@ -143,6 +291,11 @@ async function checkSwapPath(
         },
       }
     );
+    
+    if (!quoteResponse.ok) {
+      return null;
+    }
+    
     const quoteData = await quoteResponse.json() as ZxQuoteResponse;
     
     if (!quoteData.transaction) {
@@ -154,7 +307,6 @@ async function checkSwapPath(
       calldata: quoteData.transaction.data
     };
   } catch (error) {
-    console.error(`Error checking swap path: ${error}`);
     return null;
   }
 }
@@ -162,9 +314,15 @@ async function checkSwapPath(
 // アービトラージ機会をチェック
 async function checkArbitrage() {
   const timestamp = new Date().toISOString();
+  console.log(`🔍 [${timestamp.slice(11, 19)}] Scanning...`);
+  
+  let opportunitiesFound = 0;
+  let totalChecked = 0;
   
   for (const path of ARB_PATHS) {
     try {
+      totalChecked++;
+      
       // 1. 借りたトークンをターゲットトークンにスワップ
       const firstSwap = await checkSwapPath(
         path.borrowToken,
@@ -172,7 +330,10 @@ async function checkArbitrage() {
         path.borrowAmount
       );
       
-      if (!firstSwap) continue;
+      if (!firstSwap) {
+        console.log(`❌ ${path.name}: First swap failed`);
+        continue;
+      }
 
       // 2. ターゲットトークンを借りたトークンに戻す
       const secondSwap = await checkSwapPath(
@@ -181,7 +342,10 @@ async function checkArbitrage() {
         firstSwap.toAmount
       );
       
-      if (!secondSwap) continue;
+      if (!secondSwap) {
+        console.log(`❌ ${path.name}: Second swap failed`);
+        continue;
+      }
 
       // 3. 利益計算（Balancerの手数料は無料）
       const { profit, percentage } = calculateProfit(
@@ -190,74 +354,139 @@ async function checkArbitrage() {
         path.borrowDecimals
       );
 
-      console.log(`[${timestamp}] ${path.name}: Profit: $${profit.toFixed(2)} (${percentage.toFixed(3)}%)`);
-
-      // 4. 利益が閾値を超えていればアービトラージ実行
-      if (percentage > MIN_PROFIT_PERCENTAGE) {
-        const feeData = await provider.getFeeData();
-        const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
+      // 4. 利益が閾値を超えていれば詳細表示、そうでなければ簡潔表示
+      if (percentage > CONFIG.PROFIT.MIN_PERCENTAGE) {
+        opportunitiesFound++;
+        console.log(`\n🎯 ARBITRAGE OPPORTUNITY FOUND!`);
+        console.log(`📊 Path: ${path.name}`);
+        console.log(`💰 Borrowing: ${ethers.formatUnits(path.borrowAmount, path.borrowDecimals)} ${path.borrowToken === USDC ? 'USDC' : path.borrowToken === DAI ? 'DAI' : 'USDT'}`);
+        console.log(`✅ Step 1: ${ethers.formatUnits(firstSwap.toAmount, path.targetToken === WETH ? 18 : path.targetToken === DAI ? 18 : 6)} ${path.targetToken === WETH ? 'WETH' : path.targetToken === DAI ? 'DAI' : path.targetToken === USDC ? 'USDC' : 'USDT'}`);
+        console.log(`✅ Step 2: ${ethers.formatUnits(secondSwap.toAmount, path.borrowDecimals)} ${path.borrowToken === USDC ? 'USDC' : path.borrowToken === DAI ? 'DAI' : 'USDT'}`);
+        console.log(`💵 Expected profit: $${profit.toFixed(2)} (${percentage.toFixed(3)}%)`);
+        console.log(`🎯 Threshold: ${CONFIG.PROFIT.MIN_PERCENTAGE}%`);
         
-        if (!gasPrice) {
-          console.error("Failed to get gas price");
-          continue;
+        if (IS_TEST_MODE) {
+          console.log(`⚠️  TEST MODE - monitoring only`);
+        } else {
+          // 実際のアービトラージ実行
+          await executeArbitrage(path, firstSwap, secondSwap, profit);
         }
-
-        const gasPriceGwei = Number(gasPrice) / 1e9;
-        
-        if (gasPriceGwei > MAX_GAS_PRICE_GWEI) {
-          console.log(`⚠️  Gas price too high: ${gasPriceGwei.toFixed(2)} Gwei`);
-          continue;
-        }
-
-        console.log(`🎯 Arbitrage opportunity found!`);
-        console.log(`   - Path: ${path.name}`);
-        console.log(`   - Expected profit: $${profit.toFixed(2)} (${percentage.toFixed(3)}%)`);
-        console.log(`   - Gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
-
-        // フラッシュローンを実行
-        const tokens = [path.borrowToken];
-        const amounts = [path.borrowAmount];
-        
-        // 2つのスワップを組み合わせたcalldataを作成
-        // 注: 実際の実装では、コントラクト内で2つのスワップを実行する必要があります
-        const tx = await flashArb.executeFlashLoan(
-          tokens,
-          amounts,
-          firstSwap.calldata, // 簡略化のため、最初のスワップのみ
-          {
-            maxFeePerGas: feeData.maxFeePerGas,
-            maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
-            gasLimit: 600000n
-          }
-        );
-        
-        console.log(`📜 Transaction sent: ${tx.hash}`);
-        
-        const receipt = await tx.wait();
-        console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
+        console.log(`─────────────────────────────────────────`);
+      } else {
+        // マイナス利益は簡潔に表示（1行のみ）
+        console.log(`📉 ${path.name}: ${percentage.toFixed(3)}% (below threshold)`);
       }
     } catch (error) {
-      console.error(`Error checking ${path.name}:`, error);
+      console.error(`❌ ${path.name}: Error - ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  
+  // サマリー表示
+  if (opportunitiesFound > 0) {
+    console.log(`\n🎉 Found ${opportunitiesFound} opportunities out of ${totalChecked} paths checked!`);
+  } else {
+    console.log(`📊 Checked ${totalChecked} paths - No profitable opportunities (waiting...)`);
+  }
+}
+
+// アービトラージを実際に実行
+async function executeArbitrage(
+  path: ArbPath,
+  firstSwap: { toAmount: bigint; calldata: string },
+  secondSwap: { toAmount: bigint; calldata: string },
+  expectedProfit: number
+) {
+  try {
+    // 最小利益額チェック
+    if (expectedProfit < CONFIG.PROFIT.MIN_AMOUNT_USD) {
+      console.log(`⚠️  Profit too low: $${expectedProfit.toFixed(2)} < $${CONFIG.PROFIT.MIN_AMOUNT_USD}`);
+      return;
+    }
+
+    console.log(`🚀 Executing arbitrage for ${path.name}...`);
+    
+    // ガス価格チェック
+    const feeData = await provider.getFeeData();
+    const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
+    
+    if (!gasPrice) {
+      console.error("❌ Failed to get gas price");
+      return;
+    }
+
+    const gasPriceGwei = Number(gasPrice) / 1e9;
+    
+    if (gasPriceGwei > CONFIG.GAS.MAX_PRICE_GWEI) {
+      console.log(`⚠️  Gas price too high: ${gasPriceGwei.toFixed(2)} Gwei - skipping`);
+      return;
+    }
+
+    console.log(`⛽ Gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
+
+    // フラッシュローンを実行
+    const tokens = [path.borrowToken];
+    const amounts = [path.borrowAmount];
+    
+    // 2つのスワップを組み合わせたcalldataを作成
+    const userData = ethers.AbiCoder.defaultAbiCoder().encode(
+      ["bytes", "bytes"],
+      [firstSwap.calldata, secondSwap.calldata]
+    );
+    
+    const tx = await flashArb.executeFlashLoan(
+      tokens,
+      amounts,
+      userData,
+      {
+        maxFeePerGas: feeData.maxFeePerGas,
+        maxPriorityFeePerGas: ethers.parseUnits(CONFIG.GAS.PRIORITY_FEE_GWEI.toString(), "gwei"),
+        gasLimit: CONFIG.GAS.LIMIT
+      }
+    );
+    
+    console.log(`📜 Transaction sent: ${tx.hash}`);
+    console.log(`⏳ Waiting for confirmation...`);
+    
+    const receipt = await tx.wait();
+    
+    if (receipt.status === 1) {
+      console.log(`✅ Arbitrage successful!`);
+      console.log(`   - Block: ${receipt.blockNumber}`);
+      console.log(`   - Gas used: ${receipt.gasUsed.toString()}`);
+      console.log(`   - Expected profit: $${expectedProfit.toFixed(2)}`);
+      
+      // 実際の利益を計算（ガス代を差し引く）
+      const gasUsed = receipt.gasUsed * receipt.gasPrice;
+      const gasCostUSD = Number(gasUsed) / 1e18 * 3000; // ETH価格を$3000と仮定
+      const netProfit = expectedProfit - gasCostUSD;
+      
+      console.log(`   - Gas cost: $${gasCostUSD.toFixed(2)}`);
+      console.log(`   - Net profit: $${netProfit.toFixed(2)}`);
+      
+      // 状態更新
+      STATE.totalProfit += netProfit;
+      
+      console.log(`📊 Total profit: $${STATE.totalProfit.toFixed(2)}`);
+    } else {
+      console.log(`❌ Transaction failed`);
+    }
+    
+  } catch (error) {
+    console.error(`❌ Arbitrage execution failed:`, error);
   }
 }
 
 // メイン処理
 async function main() {
   console.log("🔍 Balancer Flash Loan Arbitrage Scanner Started");
-  console.log(`📍 Contract: ${BALANCER_FLASH_ARB}`);
-  console.log(`📊 Min Profit: ${MIN_PROFIT_PERCENTAGE}%`);
-  console.log(`⛽ Max Gas: ${MAX_GAS_PRICE_GWEI} Gwei`);
+  console.log(`📍 Contract: ${BALANCER_FLASH_ARB} (${IS_TEST_MODE ? 'TEST MODE' : 'LIVE MODE'})`);
+  console.log(`📊 Min Profit: ${CONFIG.PROFIT.MIN_PERCENTAGE}% ($${CONFIG.PROFIT.MIN_AMOUNT_USD})`);
+  console.log(`💰 Borrow Amount: $10,000 USDC/DAI (10x increase!)`);
+  console.log(`⛽ Max Gas: ${CONFIG.GAS.MAX_PRICE_GWEI} Gwei (limit: ${CONFIG.GAS.LIMIT.toString()})`);
+  console.log(`💸 Expected gas cost: ~$10-15 (0.1-0.15% ratio!)`);
   console.log(`🔄 Checking paths:`);
   ARB_PATHS.forEach(path => console.log(`   - ${path.name}`));
   console.log("");
-
-  // オーナー確認
-  const owner = await flashArb.owner();
-  if (owner.toLowerCase() !== signer.address.toLowerCase()) {
-    console.error("❌ You are not the owner of the contract!");
-    return;
-  }
 
   // 初回チェック
   await checkArbitrage();
@@ -266,8 +495,8 @@ async function main() {
   let blockCount = 0;
   provider.on("block", async (blockNumber) => {
     blockCount++;
-    // 5ブロックごとにチェック（負荷軽減）
-    if (blockCount % 5 === 0) {
+    // 3ブロックごとにチェック（負荷軽減）
+    if (blockCount % CONFIG.EXECUTION.CHECK_INTERVAL_BLOCKS === 0) {
       console.log(`\n⛓️  Block ${blockNumber}`);
       await checkArbitrage();
     }

@@ -65,24 +65,47 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 amount = amounts[0];
         uint256 feeAmount = feeAmounts[0];
 
-        // 借入前の残高
-        uint256 balanceBefore = token.balanceOf(address(this));
+        // userDataから0x APIのスワップデータをデコード
+        (
+            address swapTarget1,
+            address swapTarget2,
+            bytes memory swapData1,
+            bytes memory swapData2
+        ) = abi.decode(userData, (address, address, bytes, bytes));
 
-        // Permit2への承認（0x Protocolで使用）
+        // 最初のスワップのためにPermit2への承認
         require(token.approve(PERMIT2_CONTRACT, amount), "Approval failed");
 
-        // 0x Protocolでスワップ実行（userData = swapData）
-        // userDataには0x Protocol APIから取得したtransaction.dataとtoアドレスが含まれる
-        // 実際の実装では、transaction.toアドレスに対してcallを実行する必要がある
-        // 簡略化のため、ここではPermit2コントラクトを直接呼び出す
-        (bool success, ) = PERMIT2_CONTRACT.call(userData);
-        if (!success) revert SwapFailed();
+        // 最初のスワップを実行（例：USDC → DAI）
+        (bool success1, ) = swapTarget1.call(swapData1);
+        if (!success1) revert SwapFailed();
+
+        // 中間トークン（DAI）の残高を確認し、2番目のスワップのために承認
+        // 注意：実際の実装では中間トークンのアドレスを正確に特定する必要がある
+        // ここではDAIアドレスをハードコード（改善の余地あり）
+        IERC20 intermediateToken = IERC20(
+            0x6B175474E89094C44Da98b954EedeAC495271d0F
+        ); // DAI
+        uint256 intermediateBalance = intermediateToken.balanceOf(
+            address(this)
+        );
+
+        if (intermediateBalance > 0) {
+            require(
+                intermediateToken.approve(
+                    PERMIT2_CONTRACT,
+                    intermediateBalance
+                ),
+                "Intermediate approval failed"
+            );
+        }
+
+        // 2番目のスワップを実行（例：DAI → USDC）
+        (bool success2, ) = swapTarget2.call(swapData2);
+        if (!success2) revert SwapFailed();
 
         // スワップ後の残高
         uint256 balanceAfter = token.balanceOf(address(this));
-
-        // 返済額（Balancerは手数料無料）
-        uint256 amountToRepay = amount;
 
         // 利益があることを確認
         // Balancerは手数料無料なので、借入額以上の残高があれば利益
