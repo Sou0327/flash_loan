@@ -30,6 +30,9 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
     error InvalidAmount();
     error TransferFailed();
 
+    // 状態変数を追加
+    uint256 private currentMinProfitBps;
+
     constructor(address _vault) Ownable(msg.sender) {
         vault = IVault(_vault);
     }
@@ -37,14 +40,20 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
     /// @notice フラッシュローンを実行
     /// @param tokens 借りるトークンの配列（通常は1つのトークン）
     /// @param amounts 借りる量の配列
+    /// @param minProfitBps 最小利益率（ベーシスポイント、例：50 = 0.5%）
     /// @param swapData 0x Protocolのスワップデータ
     function executeFlashLoan(
         IERC20[] memory tokens,
         uint256[] memory amounts,
+        uint256 minProfitBps,
         bytes memory swapData
     ) external onlyOwner nonReentrant {
         require(tokens.length == amounts.length, "Array length mismatch");
         require(tokens.length > 0, "Empty arrays");
+        require(minProfitBps <= 1000, "Max 10% slippage"); // 最大10%
+
+        // minProfitBpsを保存
+        currentMinProfitBps = minProfitBps;
 
         // Balancerのフラッシュローンを実行
         vault.flashLoan(this, tokens, amounts, swapData);
@@ -93,11 +102,19 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         (bool success2, ) = allowanceTarget2.call(swapData2);
         if (!success2) revert SwapFailed();
 
+        // 承認をリセット（セキュリティ向上）
+        require(
+            cachedToken.approve(allowanceTarget1, 0),
+            "Approval reset failed"
+        );
+
         // スワップ後の残高
         uint256 balanceAfter = cachedToken.balanceOf(address(this));
 
-        // スリッページチェック（最小99.5%のリターンを要求）
-        uint256 minExpectedReturn = balanceBefore + (cachedAmount * 995) / 1000;
+        // 動的スリッページチェック
+        uint256 minExpectedReturn = balanceBefore +
+            (cachedAmount * (10000 - currentMinProfitBps)) /
+            10000;
         if (balanceAfter < minExpectedReturn) revert InsufficientProfit();
 
         // 利益があることを確認（Balancerは手数料無料）
@@ -154,7 +171,7 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
 
     /// @notice トークンを引き出す
     /// @param tokenAddress 引き出すトークンのアドレス（0x0でETH）
-    function withdraw(address tokenAddress) external onlyOwner {
+    function withdraw(address tokenAddress) external onlyOwner nonReentrant {
         if (tokenAddress == address(0)) {
             // ETHの引き出し
             uint256 balance = address(this).balance;

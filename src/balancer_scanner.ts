@@ -1,5 +1,4 @@
 import { ethers } from "ethers";
-import fetch from "node-fetch";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -33,7 +32,7 @@ const WBTC = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"; // WBTC
 
 // ABI
 const abi = [
-  "function executeFlashLoan(address[] tokens, uint256[] amounts, bytes userData) external",
+  "function executeFlashLoan(address[] tokens, uint256[] amounts, uint256 minProfitBps, bytes userData) external",
   "function owner() view returns (address)",
   "function withdraw(address token) external"
 ];
@@ -260,13 +259,12 @@ async function getETHPriceUSDCached(): Promise<number> {
 // 価格フィード関数（動的取得）
 async function getTokenPriceUSD(tokenAddress: string): Promise<number> {
   try {
-    // 0x API v2から価格を取得
+    // 0x API v1から価格を取得
     const response = await fetchWithTimeout(
-      `https://api.0x.org/swap/v2/price?sellToken=${tokenAddress}&buyToken=${USDC}&sellAmount=1000000000000000000`,
+      `https://api.0x.org/swap/v1/price?sellToken=${tokenAddress}&buyToken=${USDC}&sellAmount=1000000000000000000`,
       {
         headers: { 
-          '0x-api-key': apiKey,
-          '0x-version': 'v2'
+          '0x-api-key': apiKey
         },
       }
     );
@@ -298,13 +296,12 @@ async function getTokenPriceUSD(tokenAddress: string): Promise<number> {
 // ETH/USD価格を取得する専用関数
 async function getETHPriceUSD(): Promise<number> {
   try {
-    // 0x API v2でETH/USDC価格を取得
+    // 0x API v1でETH/USDC価格を取得
     const response = await fetchWithTimeout(
-      `https://api.0x.org/swap/v2/price?sellToken=${WETH}&buyToken=${USDC}&sellAmount=1000000000000000000`,
+      `https://api.0x.org/swap/v1/price?sellToken=${WETH}&buyToken=${USDC}&sellAmount=1000000000000000000`,
       {
         headers: { 
-          '0x-api-key': apiKey,
-          '0x-version': 'v2'
+          '0x-api-key': apiKey
         },
       }
     );
@@ -327,7 +324,7 @@ async function getETHPriceUSD(): Promise<number> {
 function checkSlippage(
   borrowAmount: bigint,
   returnAmount: bigint,
-  maxSlippagePercent: number = 0.5
+  maxSlippagePercent: number = CONFIG.EXECUTION.MAX_SLIPPAGE
 ): boolean {
   const slippage = Number(borrowAmount - returnAmount) / Number(borrowAmount) * 100;
   return Math.abs(slippage) <= maxSlippagePercent;
@@ -416,7 +413,7 @@ async function checkSwapPath(
   amount: bigint
 ): Promise<{ toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string } | null> {
   try {
-    const base = "https://api.0x.org/swap/v2";
+    const base = "https://api.0x.org/swap/v1";
     
     // 1. Price取得（見積もり用）
     const priceParams = new URLSearchParams({
@@ -429,8 +426,7 @@ async function checkSwapPath(
       `${base}/price?${priceParams.toString()}`,
       {
         headers: { 
-          '0x-api-key': apiKey,
-          '0x-version': 'v2'
+          '0x-api-key': apiKey
         },
       }
     );
@@ -458,8 +454,7 @@ async function checkSwapPath(
       `${base}/quote?${quoteParams.toString()}`,
       {
         headers: { 
-          '0x-api-key': apiKey,
-          '0x-version': 'v2'
+          '0x-api-key': apiKey
         },
       }
     );
@@ -632,7 +627,7 @@ async function executeArbitrage(
     console.log(`🚀 Executing ${path.name}...`);
     
     // 事前チェック：スリッページ再確認
-    if (!checkSlippage(path.borrowAmount, secondSwap.toAmount, 0.5)) {
+    if (!checkSlippage(path.borrowAmount, secondSwap.toAmount)) {
       console.log(`⚠️  Slippage check failed, aborting`);
       return;
     }
@@ -666,6 +661,9 @@ async function executeArbitrage(
     const tokens = [path.borrowToken];
     const amounts = [path.borrowAmount];
     
+    // minProfitBpsを計算（ベーシスポイント）
+    const minProfitBps = Math.floor(CONFIG.EXECUTION.MAX_SLIPPAGE * 100); // 1% = 100bps
+    
     // 新しい形式でuserDataを作成：[allowanceTarget1, data1, allowanceTarget2, data2]
     const userData = ethers.AbiCoder.defaultAbiCoder().encode(
       ["address", "bytes", "address", "bytes"],
@@ -678,14 +676,31 @@ async function executeArbitrage(
       gasPriceGwei * 0.1 // ベースガス価格の10%
     );
     
+    // ガス見積もりを動的に取得
+    let gasLimit = CONFIG.GAS.LIMIT;
+    try {
+      const estimatedGas = await flashArb.executeFlashLoan.estimateGas(
+        tokens,
+        amounts,
+        minProfitBps,
+        userData
+      );
+      // 10%のバッファを追加
+      gasLimit = (estimatedGas * 110n) / 100n;
+      console.log(`⛽ Estimated gas: ${estimatedGas.toString()} (with buffer: ${gasLimit.toString()})`);
+    } catch (error) {
+      console.log(`⚠️  Gas estimation failed, using default: ${gasLimit.toString()}`);
+    }
+    
     const tx = await flashArb.executeFlashLoan(
       tokens,
       amounts,
+      minProfitBps,
       userData,
       {
         maxFeePerGas: feeData.maxFeePerGas,
         maxPriorityFeePerGas: ethers.parseUnits(priorityFee.toString(), "gwei"),
-        gasLimit: CONFIG.GAS.LIMIT
+        gasLimit: gasLimit
       }
     );
     
