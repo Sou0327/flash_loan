@@ -1,4 +1,7 @@
 import { ethers } from "ethers";
+import { FlashbotsBundleProvider } from '@flashbots/ethers-provider-bundle';
+import { z } from 'zod';
+import { startMetricsServer, updateMetrics } from './metrics';
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -13,6 +16,28 @@ if (!PRIVATE_KEY || PRIVATE_KEY.length !== 66) {
 const RPC_URL = process.env.MAINNET_RPC || process.env.ALCHEMY_WSS?.replace('wss://', 'https://');
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+
+// Flashbots設定（MEV保護）
+let flashbotsProvider: FlashbotsBundleProvider | null = null;
+const FLASHBOTS_ENABLED = process.env.FLASHBOTS_ENABLED === "true";
+
+async function initFlashbots() {
+  if (!FLASHBOTS_ENABLED || IS_FORK_ENVIRONMENT) {
+    return;
+  }
+  
+  try {
+    flashbotsProvider = await FlashbotsBundleProvider.create(
+      provider,
+      wallet,
+      'https://relay.flashbots.net',
+      'mainnet'
+    );
+    console.log("🛡️  Flashbots MEV protection enabled");
+  } catch (error) {
+    console.warn("⚠️  Flashbots initialization failed, using public mempool");
+  }
+}
 
 // フォーク環境の検出（より厳密に）
 const IS_FORK_ENVIRONMENT = (RPC_URL?.includes('127.0.0.1') || 
@@ -81,7 +106,30 @@ const STATE = {
   successfulTransactions: 0,
   lastBlockNumber: 0,
   startTime: Date.now(),
+  gasHistory: [] as Array<{ gasUsedUSD: number; timestamp: number; blockNumber: number }>,
+  avgGasUSD: 0,
 };
+
+// ガス履歴の管理
+const GAS_HISTORY_SIZE = 20; // 過去20件の平均を使用
+
+function updateGasHistory(gasUsedUSD: number, blockNumber: number) {
+  STATE.gasHistory.push({
+    gasUsedUSD,
+    timestamp: Date.now(),
+    blockNumber
+  });
+  
+  // 履歴サイズを制限
+  if (STATE.gasHistory.length > GAS_HISTORY_SIZE) {
+    STATE.gasHistory.shift();
+  }
+  
+  // 平均ガス代を更新
+  STATE.avgGasUSD = STATE.gasHistory.reduce((sum, entry) => sum + entry.gasUsedUSD, 0) / STATE.gasHistory.length;
+  
+  console.log(`⛽ Gas used: $${gasUsedUSD.toFixed(2)} | Avg: $${STATE.avgGasUSD.toFixed(2)}`);
+}
 
 // 設定（旧設定を削除）
 const IS_TEST_MODE = IS_FORK_ENVIRONMENT; // フォーク環境では自動的にテストモード
@@ -109,6 +157,104 @@ const AUTO_WITHDRAW_ENABLED = process.env.AUTO_WITHDRAW_ENABLED === "true";
 // 0x Protocol API設定
 const apiKey = process.env.ZX_API_KEY!; // 0x APIキー
 const chainId = "1";
+
+// API フェイルオーバー設定
+const API_PROVIDERS = [
+  {
+    name: "0x",
+    baseUrl: "https://api.0x.org/swap/v1",
+    headers: { '0x-api-key': apiKey }
+  },
+  {
+    name: "1inch",
+    baseUrl: "https://api.1inch.dev/swap/v5.2/1",
+    headers: { 'Authorization': `Bearer ${process.env.ONEINCH_API_KEY}` }
+  }
+];
+
+let currentProviderIndex = 0;
+const rateLimitState = new Map<string, { resetTime: number; remaining: number }>();
+
+// Rate-limit対応のfetch
+async function fetchWithRateLimit(url: string, options: any, retries = 3): Promise<any> {
+  const provider = API_PROVIDERS[currentProviderIndex];
+  const fullUrl = url.replace("https://api.0x.org/swap/v1", provider.baseUrl);
+  
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      // Rate-limit チェック
+      const rateLimitKey = provider.name;
+      const rateLimit = rateLimitState.get(rateLimitKey);
+      
+      if (rateLimit && Date.now() < rateLimit.resetTime && rateLimit.remaining <= 0) {
+        const waitTime = rateLimit.resetTime - Date.now();
+        console.log(`⏳ Rate limited, waiting ${waitTime}ms for ${provider.name}`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+      
+      const response = await fetch(fullUrl, {
+        ...options,
+        headers: { ...options.headers, ...provider.headers }
+      });
+      
+      // Rate-limit ヘッダーを保存
+      const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '100');
+      const resetTime = parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000;
+      
+      rateLimitState.set(rateLimitKey, { resetTime, remaining });
+      
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get('retry-after') || '1') * 1000;
+        console.log(`⏳ Rate limited by ${provider.name}, waiting ${retryAfter}ms`);
+        await new Promise(resolve => setTimeout(resolve, retryAfter));
+        continue;
+      }
+      
+      if (response.status >= 500) {
+        console.warn(`⚠️  ${provider.name} server error (${response.status}), trying next provider`);
+        currentProviderIndex = (currentProviderIndex + 1) % API_PROVIDERS.length;
+        continue;
+      }
+      
+      return response;
+      
+    } catch (error) {
+      console.warn(`⚠️  ${provider.name} failed (attempt ${attempt + 1}):`, error);
+      
+      if (attempt === retries - 1) {
+        // 最後の試行でも失敗したら次のプロバイダーに切り替え
+        currentProviderIndex = (currentProviderIndex + 1) % API_PROVIDERS.length;
+        throw error;
+      }
+      
+      // 指数バックオフ
+      const backoffTime = Math.min(1000 * Math.pow(2, attempt), 10000);
+      await new Promise(resolve => setTimeout(resolve, backoffTime));
+    }
+  }
+  
+  throw new Error(`All API providers failed after ${retries} retries`);
+}
+
+// Zodスキーマ定義（0x APIレスポンス検証）
+const ZxPriceSchema = z.object({
+  buyAmount: z.string(),
+  sellAmount: z.string(),
+  price: z.string().optional(),
+  guaranteedPrice: z.string().optional(),
+});
+
+const ZxQuoteSchema = z.object({
+  data: z.string(),
+  to: z.string(),
+  allowanceTarget: z.string(),
+  estimatedGas: z.string().optional(),
+  buyAmount: z.string(),
+  sellAmount: z.string(),
+});
+
+type ZxPriceResponse = z.infer<typeof ZxPriceSchema>;
+type ZxQuoteResponse = z.infer<typeof ZxQuoteSchema>;
 
 // アービトラージパスの定義
 interface ArbPath {
@@ -260,7 +406,7 @@ async function getETHPriceUSDCached(): Promise<number> {
 async function getTokenPriceUSD(tokenAddress: string): Promise<number> {
   try {
     // 0x API v1から価格を取得
-    const response = await fetchWithTimeout(
+    const response = await fetchWithRateLimit(
       `https://api.0x.org/swap/v1/price?sellToken=${tokenAddress}&buyToken=${USDC}&sellAmount=1000000000000000000`,
       {
         headers: { 
@@ -297,7 +443,7 @@ async function getTokenPriceUSD(tokenAddress: string): Promise<number> {
 async function getETHPriceUSD(): Promise<number> {
   try {
     // 0x API v1でETH/USDC価格を取得
-    const response = await fetchWithTimeout(
+    const response = await fetchWithRateLimit(
       `https://api.0x.org/swap/v1/price?sellToken=${WETH}&buyToken=${USDC}&sellAmount=1000000000000000000`,
       {
         headers: { 
@@ -355,15 +501,25 @@ async function calculateMinProfitPercentage(
     totalGasEstimate = gas1 + gas2 + 100000;
   }
   
-  const gasCostETH = (totalGasEstimate * gasPriceGwei) / 1e9;
-  const gasCostUSD = gasCostETH * ethPriceUSD;
+  // 実ガス履歴がある場合はそれを優先使用
+  let gasCostUSD: number;
+  if (STATE.avgGasUSD > 0 && STATE.gasHistory.length >= 5) {
+    // 過去の実績ベース（1.2倍の安全マージン）
+    gasCostUSD = STATE.avgGasUSD * 1.2;
+    console.log(`📊 Using historical gas data: $${gasCostUSD.toFixed(2)} (avg: $${STATE.avgGasUSD.toFixed(2)})`);
+  } else {
+    // 見積もりベース
+    const gasCostETH = (totalGasEstimate * gasPriceGwei) / 1e9;
+    gasCostUSD = gasCostETH * ethPriceUSD;
+    console.log(`📊 Using estimated gas: $${gasCostUSD.toFixed(2)}`);
+  }
   
-  // ガス代の2倍以上の利益を確保
-  const minProfitUSD = gasCostUSD * 2;
+  // ガス代の2.5倍以上の利益を確保（より保守的）
+  const minProfitUSD = gasCostUSD * 2.5;
   const calculatedPercentage = (minProfitUSD / borrowAmountUSD) * 100;
   
-  // 最小0.2%、最大2%の範囲に制限（より現実的）
-  return Math.max(0.2, Math.min(2.0, calculatedPercentage));
+  // 最小0.2%、最大3%の範囲に制限（ガス高騰時対応）
+  return Math.max(0.2, Math.min(3.0, calculatedPercentage));
 }
 
 // 利益計算
@@ -377,33 +533,6 @@ function calculateProfit(
   const profit = returned - borrowed;
   const percentage = (profit / borrowed) * 100;
   return { profit, percentage };
-}
-
-// 0x Protocol APIレスポンスの型定義
-interface ZxPriceResponse {
-  buyAmount?: string;
-  sellAmount?: string;
-  [key: string]: any;
-}
-
-interface ZxQuoteResponse {
-  data?: string;
-  to?: string;
-  allowanceTarget?: string;
-  estimatedGas?: string;
-  [key: string]: any;
-}
-
-// タイムアウト付きfetch
-async function fetchWithTimeout(url: string, options: any): Promise<any> {
-  try {
-    const response = await fetch(url, {
-      ...options
-    });
-    return response;
-  } catch (error) {
-    throw error;
-  }
 }
 
 // 0x Protocol APIでスワップパスをチェック
@@ -422,7 +551,7 @@ async function checkSwapPath(
       sellAmount: amount.toString()
     });
     
-    const priceResponse = await fetchWithTimeout(
+    const priceResponse = await fetchWithRateLimit(
       `${base}/price?${priceParams.toString()}`,
       {
         headers: { 
@@ -435,9 +564,16 @@ async function checkSwapPath(
       return null;
     }
 
-    const priceData = await priceResponse.json() as ZxPriceResponse;
+    const priceData = await priceResponse.json();
     
-    if (!priceData.buyAmount) {
+    // Zodバリデーション
+    const validatedPriceData = ZxPriceSchema.safeParse(priceData);
+    if (!validatedPriceData.success) {
+      console.warn("⚠️  Invalid price response format:", validatedPriceData.error);
+      return null;
+    }
+    
+    if (!validatedPriceData.data.buyAmount) {
       return null;
     }
 
@@ -450,7 +586,7 @@ async function checkSwapPath(
       slippagePercentage: (CONFIG.EXECUTION.MAX_SLIPPAGE / 100).toString()
     });
     
-    const quoteResponse = await fetchWithTimeout(
+    const quoteResponse = await fetchWithRateLimit(
       `${base}/quote?${quoteParams.toString()}`,
       {
         headers: { 
@@ -463,18 +599,25 @@ async function checkSwapPath(
       return null;
     }
     
-    const quoteData = await quoteResponse.json() as ZxQuoteResponse;
+    const quoteData = await quoteResponse.json();
     
-    if (!quoteData.data || !quoteData.to) {
+    // Zodバリデーション
+    const validatedQuoteData = ZxQuoteSchema.safeParse(quoteData);
+    if (!validatedQuoteData.success) {
+      console.warn("⚠️  Invalid quote response format:", validatedQuoteData.error);
+      return null;
+    }
+    
+    if (!validatedQuoteData.data.data || !validatedQuoteData.data.to) {
       return null;
     }
 
     return {
-      toAmount: BigInt(priceData.buyAmount),
-      calldata: quoteData.data,
-      target: quoteData.to,
-      allowanceTarget: quoteData.allowanceTarget || quoteData.to,
-      estimatedGas: quoteData.estimatedGas
+      toAmount: BigInt(validatedPriceData.data.buyAmount),
+      calldata: validatedQuoteData.data.data,
+      target: validatedQuoteData.data.to,
+      allowanceTarget: validatedQuoteData.data.allowanceTarget || validatedQuoteData.data.to,
+      estimatedGas: validatedQuoteData.data.estimatedGas
     };
   } catch (error) {
     return null;
@@ -558,10 +701,22 @@ async function checkArbitrage() {
   const timestamp = new Date().toISOString();
   console.log(`🔍 [${timestamp.slice(11, 19)}] Scanning...`);
   
+  const startTime = Date.now();
+  
   // 現在のガス価格を取得
   const feeData = await provider.getFeeData();
   const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
   const gasPriceGwei = gasPrice ? Number(gasPrice) / 1e9 : 20;
+  
+  // ETH価格を取得
+  const ethPrice = await getETHPriceUSDCached();
+  
+  // メトリクス更新
+  updateMetrics({
+    gasPrice: gasPriceGwei,
+    ethPrice: ethPrice,
+    avgGasCost: STATE.avgGasUSD
+  });
   
   // 並列処理で全パスをチェック
   const results = await Promise.all(
@@ -594,6 +749,11 @@ async function checkArbitrage() {
         console.log(`💵 Expected profit: $${(profit * (borrowAmountUSD / Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)))).toFixed(2)}`);
         console.log(`⛽ Gas: ${gasPriceGwei.toFixed(2)} Gwei`);
         
+        // メトリクス更新
+        updateMetrics({
+          profitPercentage: percentage
+        });
+        
         if (IS_TEST_MODE) {
           console.log(`⚠️  TEST MODE - monitoring only`);
         } else {
@@ -609,6 +769,12 @@ async function checkArbitrage() {
       console.log(`❌ ${result.path.name}: ${result.error}`);
     }
   }
+  
+  // メトリクス更新
+  updateMetrics({
+    activeOpportunities: opportunitiesFound,
+    executionTime: (Date.now() - startTime) / 1000
+  });
   
   // サマリー表示（簡潔に）
   if (opportunitiesFound > 0) {
@@ -706,6 +872,42 @@ async function executeArbitrage(
     
     console.log(`📜 TX: ${tx.hash}`);
     
+    // Flashbotsを使用してMEV保護
+    if (flashbotsProvider && !IS_FORK_ENVIRONMENT) {
+      try {
+        const targetBlockNumber = await provider.getBlockNumber() + 1;
+        const bundle = [
+          {
+            signedTransaction: await wallet.signTransaction({
+              to: BALANCER_FLASH_ARB,
+              data: flashArb.interface.encodeFunctionData("executeFlashLoan", [
+                tokens,
+                amounts,
+                minProfitBps,
+                userData
+              ]),
+              maxFeePerGas: feeData.maxFeePerGas,
+              maxPriorityFeePerGas: ethers.parseUnits(priorityFee.toString(), "gwei"),
+              gasLimit: gasLimit,
+              nonce: await wallet.getNonce()
+            })
+          }
+        ];
+        
+        const bundleResponse = await flashbotsProvider.sendBundle(bundle, targetBlockNumber);
+        console.log(`🛡️  Flashbots bundle submitted for block ${targetBlockNumber}`);
+        
+        // 簡単な成功チェック
+        if ('error' in bundleResponse) {
+          console.warn(`⚠️  Flashbots error: ${bundleResponse.error.message}`);
+        } else {
+          console.log(`✅ Flashbots bundle accepted`);
+        }
+      } catch (flashbotsError) {
+        console.warn(`⚠️  Flashbots failed, using public mempool:`, flashbotsError);
+      }
+    }
+    
     // トランザクション数をカウント
     STATE.totalTransactions++;
     
@@ -729,6 +931,9 @@ async function executeArbitrage(
       
       // 自動引き出しチェック
       await autoWithdraw();
+      
+      // ガス履歴の更新
+      updateGasHistory(gasCostUSD, receipt.blockNumber);
       
     } else {
       console.log(`❌ Transaction failed`);
@@ -810,6 +1015,14 @@ async function main() {
   console.log("🔍 Balancer Flash Loan Arbitrage Scanner");
   console.log(`📊 ${NETWORK_NAME} ${IS_FORK_ENVIRONMENT ? '🧪' : '🔴'} | Contract: ${BALANCER_FLASH_ARB}`);
   console.log(`⚙️  Min Profit: ${IS_FORK_ENVIRONMENT ? FORK_CONFIG.PROFIT.MIN_PERCENTAGE : CONFIG.PROFIT.MIN_PERCENTAGE}% | Mode: ${IS_TEST_MODE ? "TEST" : "LIVE"}`);
+  
+  // Flashbots初期化
+  await initFlashbots();
+  
+  // メトリクスサーバー起動
+  if (process.env.METRICS_ENABLED === "true") {
+    startMetricsServer();
+  }
   
   // 自動引き出し設定表示
   if (AUTO_WITHDRAW_ENABLED) {

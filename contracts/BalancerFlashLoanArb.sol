@@ -7,8 +7,26 @@ import "@balancer-labs/v2-interfaces/contracts/solidity-utils/openzeppelin/IERC2
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+// Chainlink価格フィード
+interface AggregatorV3Interface {
+    function latestRoundData()
+        external
+        view
+        returns (
+            uint80 roundId,
+            int256 price,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+}
+
 contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
     IVault private immutable vault;
+
+    // Chainlink価格フィード（ETH/USD）
+    AggregatorV3Interface private constant ETH_USD_FEED =
+        AggregatorV3Interface(0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419);
 
     // 0x Protocol Permit2 Contract
     address public constant PERMIT2_CONTRACT =
@@ -201,4 +219,34 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
 
     /// @notice ETHを受け取れるようにする
     receive() external payable {}
+
+    /// @notice ETH/USD価格を取得（Chainlink）
+    /// @return price ETH価格（8桁精度、例：300000000000 = $3000.00）
+    function getETHPriceUSD() external view returns (uint256 price) {
+        (, int256 answer, , uint256 updatedAt, ) = ETH_USD_FEED
+            .latestRoundData();
+
+        // 価格が24時間以内に更新されていることを確認
+        require(block.timestamp - updatedAt <= 86400, "Price data too old");
+        require(answer > 0, "Invalid price");
+
+        return uint256(answer); // 8桁精度（例：300000000000 = $3000.00）
+    }
+
+    /// @notice ガス代をUSD換算で取得
+    /// @param gasUsed 使用ガス量
+    /// @param gasPrice ガス価格（wei）
+    /// @return gasCostUSD ガス代のUSD換算（18桁精度）
+    function getGasCostUSD(
+        uint256 gasUsed,
+        uint256 gasPrice
+    ) external view returns (uint256 gasCostUSD) {
+        uint256 ethPriceUSD = this.getETHPriceUSD(); // 8桁精度
+        uint256 gasCostWei = gasUsed * gasPrice;
+
+        // gasCostWei (18桁) * ethPriceUSD (8桁) / 1e18 / 1e8 = USD (18桁)
+        gasCostUSD = (gasCostWei * ethPriceUSD) / 1e8;
+
+        return gasCostUSD;
+    }
 }
