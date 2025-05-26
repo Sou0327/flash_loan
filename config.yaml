@@ -1,0 +1,94 @@
+# Balancer Flash Loan Arbitrage Bot Configuration
+# 型安全な設定管理（convict + YAML）
+
+# ネットワーク設定
+network:
+  mainnet_rpc: "https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
+  flashbots_rpc: "https://rpc.flashbots.net"
+  use_flashbots: true
+  chain_id: 1
+
+# コントラクト設定
+contracts:
+  balancer_flash_arb: "0xfb6dAB6200b8958C2655C3747708F82243d3F32E"
+  usdc: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+  weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  dai: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+  usdt: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+  wbtc: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+
+# 借入額設定（本番環境）
+amounts:
+  mainnet:
+    usdc: "50000" # 5万 USDC
+    dai: "50000" # 5万 DAI
+    weth: "15" # 15 WETH
+    wbtc: "1.5" # 1.5 WBTC
+  fork:
+    usdc: "1000" # 1000 USDC（テスト用）
+    dai: "1000" # 1000 DAI
+    weth: "0.5" # 0.5 WETH
+    wbtc: "0.02" # 0.02 WBTC
+
+# ガス設定
+gas:
+  limit: 400000
+  max_price_gwei: 25
+  priority_fee_gwei: 1.5
+  dynamic_ceiling: true # eth_feeHistory使用
+  ceiling_blocks: 10 # 過去10ブロック平均
+  ceiling_multiplier: 1.5 # 平均の1.5倍まで許可
+
+# 利益設定
+profit:
+  mainnet:
+    min_percentage: 0.2
+    min_amount_usd: 100
+    gas_multiplier: 2.0
+  fork:
+    min_percentage: 0.1
+    min_amount_usd: 1
+    gas_multiplier: 1.5
+
+# 実行制御
+execution:
+  check_interval_blocks: 3
+  max_slippage: 1.0
+
+# 監視設定
+monitoring:
+  block_interval: 3
+  max_slippage_percent: 0.5
+
+# 自動引き出し設定
+auto_withdraw:
+  enabled: false
+  threshold_usd: 1000
+  token: "usdc"
+
+# API設定
+api:
+  zx_api_key: "YOUR_0X_API_KEY"
+  oneinch_api_key: "YOUR_1INCH_API_KEY"
+
+# Redis設定（外部キャッシュ）
+redis:
+  enabled: false
+  host: "localhost"
+  port: 6379
+  password: ""
+  ttl_seconds: 30
+
+# メトリクス設定
+metrics:
+  enabled: false
+  port: 3001
+  auth_user: "admin"
+  auth_pass: "changeme"
+  allowed_ips: ["127.0.0.1", "::1"]
+
+# Permit2設定
+permit2:
+  enabled: false
+  contract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+  expiration_seconds: 600 # 10分

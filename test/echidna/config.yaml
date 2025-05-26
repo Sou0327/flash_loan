@@ -1,0 +1,25 @@
+# Echidna Configuration for Re-entrancy Testing
+testMode: property
+testLimit: 2000
+timeout: 300
+shrinkLimit: 5000
+seqLen: 100
+contractAddr: "0x00a329c0648769A73afAc7F9381E08FB43dBEA72"
+deployer: "0x41414141414141414141414141414141414141"
+sender: ["0x10000", "0x20000", "0x00a329c0648769A73afAc7F9381E08FB43dBEA72"]
+psender: "0x00a329c0648769A73afAc7F9381E08FB43dBEA72"
+prefix: "echidna_"
+cryticArgs: ["--solc-version", "0.8.20"]
+multi-abi: true
+corpus-dir: "test/echidna/corpus"
+coverage: true
+estimateGas: true
+maxGasprice: 100000000000
+balanceAddr: 1000000000000000000000
+balanceContract: 1000000000000000000000
+codeSize: 0x6000
+checkAsserts: true
+filterBlacklist: true
+filterFunctions: ["transfer", "transferFrom", "approve"]
+stopOnFail: false
+format: text

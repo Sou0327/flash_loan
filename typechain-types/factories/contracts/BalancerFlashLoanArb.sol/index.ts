@@ -3,3 +3,9 @@
 /* eslint-disable */
 export { AggregatorV3Interface__factory } from "./AggregatorV3Interface__factory";
 export { BalancerFlashLoanArb__factory } from "./BalancerFlashLoanArb__factory";
+export { IERC20__factory } from "./IERC20__factory";
+export { IFlashLoanRecipient__factory } from "./IFlashLoanRecipient__factory";
+export { IProtocolFeesCollector__factory } from "./IProtocolFeesCollector__factory";
+export { IVault__factory } from "./IVault__factory";
+export { Ownable__factory } from "./Ownable__factory";
+export { Pausable__factory } from "./Pausable__factory";

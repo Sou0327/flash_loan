@@ -54,6 +54,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.Ownable__factory>;
     getContractFactory(
+      name: "Pausable",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.Pausable__factory>;
+    getContractFactory(
       name: "ReentrancyGuard",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.ReentrancyGuard__factory>;
@@ -65,6 +69,30 @@ declare module "hardhat/types/runtime" {
       name: "BalancerFlashLoanArb",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.BalancerFlashLoanArb__factory>;
+    getContractFactory(
+      name: "IERC20",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IERC20__factory>;
+    getContractFactory(
+      name: "IFlashLoanRecipient",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IFlashLoanRecipient__factory>;
+    getContractFactory(
+      name: "IProtocolFeesCollector",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IProtocolFeesCollector__factory>;
+    getContractFactory(
+      name: "IVault",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IVault__factory>;
+    getContractFactory(
+      name: "Ownable",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.Ownable__factory>;
+    getContractFactory(
+      name: "Pausable",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.Pausable__factory>;
 
     getContractAt(
       name: "IAuthentication",
@@ -117,6 +145,11 @@ declare module "hardhat/types/runtime" {
       signer?: ethers.Signer
     ): Promise<Contracts.Ownable>;
     getContractAt(
+      name: "Pausable",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.Pausable>;
+    getContractAt(
       name: "ReentrancyGuard",
       address: string | ethers.Addressable,
       signer?: ethers.Signer
@@ -131,6 +164,36 @@ declare module "hardhat/types/runtime" {
       address: string | ethers.Addressable,
       signer?: ethers.Signer
     ): Promise<Contracts.BalancerFlashLoanArb>;
+    getContractAt(
+      name: "IERC20",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IERC20>;
+    getContractAt(
+      name: "IFlashLoanRecipient",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IFlashLoanRecipient>;
+    getContractAt(
+      name: "IProtocolFeesCollector",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IProtocolFeesCollector>;
+    getContractAt(
+      name: "IVault",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IVault>;
+    getContractAt(
+      name: "Ownable",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.Ownable>;
+    getContractAt(
+      name: "Pausable",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.Pausable>;
 
     deployContract(
       name: "IAuthentication",
@@ -173,6 +236,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.Ownable>;
     deployContract(
+      name: "Pausable",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Pausable>;
+    deployContract(
       name: "ReentrancyGuard",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.ReentrancyGuard>;
@@ -184,6 +251,30 @@ declare module "hardhat/types/runtime" {
       name: "BalancerFlashLoanArb",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.BalancerFlashLoanArb>;
+    deployContract(
+      name: "IERC20",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IERC20>;
+    deployContract(
+      name: "IFlashLoanRecipient",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IFlashLoanRecipient>;
+    deployContract(
+      name: "IProtocolFeesCollector",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IProtocolFeesCollector>;
+    deployContract(
+      name: "IVault",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IVault>;
+    deployContract(
+      name: "Ownable",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Ownable>;
+    deployContract(
+      name: "Pausable",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Pausable>;
 
     deployContract(
       name: "IAuthentication",
@@ -236,6 +327,11 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.Ownable>;
     deployContract(
+      name: "Pausable",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Pausable>;
+    deployContract(
       name: "ReentrancyGuard",
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
@@ -250,6 +346,36 @@ declare module "hardhat/types/runtime" {
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.BalancerFlashLoanArb>;
+    deployContract(
+      name: "IERC20",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IERC20>;
+    deployContract(
+      name: "IFlashLoanRecipient",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IFlashLoanRecipient>;
+    deployContract(
+      name: "IProtocolFeesCollector",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IProtocolFeesCollector>;
+    deployContract(
+      name: "IVault",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IVault>;
+    deployContract(
+      name: "Ownable",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Ownable>;
+    deployContract(
+      name: "Pausable",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.Pausable>;
 
     // default types
     getContractFactory(

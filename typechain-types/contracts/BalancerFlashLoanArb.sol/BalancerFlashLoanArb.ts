@@ -26,30 +26,33 @@ import type {
 export interface BalancerFlashLoanArbInterface extends Interface {
   getFunction(
     nameOrSignature:
-      | "_executeArbitrageExternal"
       | "emergencyWithdrawMultiple"
       | "executeFlashLoan"
       | "getETHPriceUSD"
       | "getGasCostUSD"
       | "owner"
+      | "pause"
+      | "paused"
+      | "pokeFallbackPrice"
       | "receiveFlashLoan"
-      | "renounceOwnership"
-      | "transferOwnership"
+      | "setTrustedSpender"
+      | "trustedSpenders"
+      | "unpause"
       | "withdraw"
   ): FunctionFragment;
 
   getEvent(
     nameOrSignatureOrTopic:
       | "EmergencyWithdraw"
+      | "FallbackPriceUpdated"
       | "FlashLoanExecuted"
       | "OwnershipTransferred"
+      | "Paused"
       | "SwapExecuted"
+      | "TrustedSpenderUpdated"
+      | "Unpaused"
   ): EventFragment;
 
-  encodeFunctionData(
-    functionFragment: "_executeArbitrageExternal",
-    values: [AddressLike, BigNumberish, BigNumberish, BigNumberish, BytesLike]
-  ): string;
   encodeFunctionData(
     functionFragment: "emergencyWithdrawMultiple",
     values: [AddressLike[]]
@@ -67,27 +70,30 @@ export interface BalancerFlashLoanArbInterface extends Interface {
     values: [BigNumberish, BigNumberish]
   ): string;
   encodeFunctionData(functionFragment: "owner", values?: undefined): string;
+  encodeFunctionData(functionFragment: "pause", values?: undefined): string;
+  encodeFunctionData(functionFragment: "paused", values?: undefined): string;
+  encodeFunctionData(
+    functionFragment: "pokeFallbackPrice",
+    values: [BigNumberish]
+  ): string;
   encodeFunctionData(
     functionFragment: "receiveFlashLoan",
     values: [AddressLike[], BigNumberish[], BigNumberish[], BytesLike]
   ): string;
   encodeFunctionData(
-    functionFragment: "renounceOwnership",
-    values?: undefined
+    functionFragment: "setTrustedSpender",
+    values: [AddressLike, boolean]
   ): string;
   encodeFunctionData(
-    functionFragment: "transferOwnership",
+    functionFragment: "trustedSpenders",
     values: [AddressLike]
   ): string;
+  encodeFunctionData(functionFragment: "unpause", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "withdraw",
     values: [AddressLike]
   ): string;
 
-  decodeFunctionResult(
-    functionFragment: "_executeArbitrageExternal",
-    data: BytesLike
-  ): Result;
   decodeFunctionResult(
     functionFragment: "emergencyWithdrawMultiple",
     data: BytesLike
@@ -105,18 +111,25 @@ export interface BalancerFlashLoanArbInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "pause", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "paused", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "pokeFallbackPrice",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "receiveFlashLoan",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "renounceOwnership",
+    functionFragment: "setTrustedSpender",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "transferOwnership",
+    functionFragment: "trustedSpenders",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(functionFragment: "unpause", data: BytesLike): Result;
   decodeFunctionResult(functionFragment: "withdraw", data: BytesLike): Result;
 }
 
@@ -133,24 +146,49 @@ export namespace EmergencyWithdrawEvent {
   export type LogDescription = TypedLogDescription<Event>;
 }
 
+export namespace FallbackPriceUpdatedEvent {
+  export type InputTuple = [newPrice: BigNumberish, timestamp: BigNumberish];
+  export type OutputTuple = [newPrice: bigint, timestamp: bigint];
+  export interface OutputObject {
+    newPrice: bigint;
+    timestamp: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
 export namespace FlashLoanExecutedEvent {
   export type InputTuple = [
     token: AddressLike,
     amount: BigNumberish,
     feeAmount: BigNumberish,
-    profit: BigNumberish
+    profit: BigNumberish,
+    minProfitBps: BigNumberish,
+    blockNumber: BigNumberish,
+    gasPrice: BigNumberish,
+    baseFee: BigNumberish
   ];
   export type OutputTuple = [
     token: string,
     amount: bigint,
     feeAmount: bigint,
-    profit: bigint
+    profit: bigint,
+    minProfitBps: bigint,
+    blockNumber: bigint,
+    gasPrice: bigint,
+    baseFee: bigint
   ];
   export interface OutputObject {
     token: string;
     amount: bigint;
     feeAmount: bigint;
     profit: bigint;
+    minProfitBps: bigint;
+    blockNumber: bigint;
+    gasPrice: bigint;
+    baseFee: bigint;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -164,6 +202,18 @@ export namespace OwnershipTransferredEvent {
   export interface OutputObject {
     previousOwner: string;
     newOwner: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace PausedEvent {
+  export type InputTuple = [account: AddressLike];
+  export type OutputTuple = [account: string];
+  export interface OutputObject {
+    account: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -192,6 +242,31 @@ export namespace SwapExecutedEvent {
     inAmount: bigint;
     outAmount: bigint;
     target: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace TrustedSpenderUpdatedEvent {
+  export type InputTuple = [spender: AddressLike, trusted: boolean];
+  export type OutputTuple = [spender: string, trusted: boolean];
+  export interface OutputObject {
+    spender: string;
+    trusted: boolean;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace UnpausedEvent {
+  export type InputTuple = [account: AddressLike];
+  export type OutputTuple = [account: string];
+  export interface OutputObject {
+    account: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -242,18 +317,6 @@ export interface BalancerFlashLoanArb extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
-  _executeArbitrageExternal: TypedContractMethod<
-    [
-      cachedToken: AddressLike,
-      cachedAmount: BigNumberish,
-      feeAmount: BigNumberish,
-      localMinProfitBps: BigNumberish,
-      userData: BytesLike
-    ],
-    [void],
-    "nonpayable"
-  >;
-
   emergencyWithdrawMultiple: TypedContractMethod<
     [tokens: AddressLike[]],
     [void],
@@ -271,15 +334,25 @@ export interface BalancerFlashLoanArb extends BaseContract {
     "nonpayable"
   >;
 
-  getETHPriceUSD: TypedContractMethod<[], [bigint], "view">;
+  getETHPriceUSD: TypedContractMethod<[], [bigint], "nonpayable">;
 
   getGasCostUSD: TypedContractMethod<
     [gasUsed: BigNumberish, gasPrice: BigNumberish],
     [bigint],
-    "view"
+    "nonpayable"
   >;
 
   owner: TypedContractMethod<[], [string], "view">;
+
+  pause: TypedContractMethod<[], [void], "nonpayable">;
+
+  paused: TypedContractMethod<[], [boolean], "view">;
+
+  pokeFallbackPrice: TypedContractMethod<
+    [newPriceUSD: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
 
   receiveFlashLoan: TypedContractMethod<
     [
@@ -292,13 +365,15 @@ export interface BalancerFlashLoanArb extends BaseContract {
     "nonpayable"
   >;
 
-  renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
-
-  transferOwnership: TypedContractMethod<
-    [newOwner: AddressLike],
+  setTrustedSpender: TypedContractMethod<
+    [spender: AddressLike, trusted: boolean],
     [void],
     "nonpayable"
   >;
+
+  trustedSpenders: TypedContractMethod<[arg0: AddressLike], [boolean], "view">;
+
+  unpause: TypedContractMethod<[], [void], "nonpayable">;
 
   withdraw: TypedContractMethod<
     [tokenAddress: AddressLike],
@@ -310,19 +385,6 @@ export interface BalancerFlashLoanArb extends BaseContract {
     key: string | FunctionFragment
   ): T;
 
-  getFunction(
-    nameOrSignature: "_executeArbitrageExternal"
-  ): TypedContractMethod<
-    [
-      cachedToken: AddressLike,
-      cachedAmount: BigNumberish,
-      feeAmount: BigNumberish,
-      localMinProfitBps: BigNumberish,
-      userData: BytesLike
-    ],
-    [void],
-    "nonpayable"
-  >;
   getFunction(
     nameOrSignature: "emergencyWithdrawMultiple"
   ): TypedContractMethod<[tokens: AddressLike[]], [void], "nonpayable">;
@@ -340,17 +402,26 @@ export interface BalancerFlashLoanArb extends BaseContract {
   >;
   getFunction(
     nameOrSignature: "getETHPriceUSD"
-  ): TypedContractMethod<[], [bigint], "view">;
+  ): TypedContractMethod<[], [bigint], "nonpayable">;
   getFunction(
     nameOrSignature: "getGasCostUSD"
   ): TypedContractMethod<
     [gasUsed: BigNumberish, gasPrice: BigNumberish],
     [bigint],
-    "view"
+    "nonpayable"
   >;
   getFunction(
     nameOrSignature: "owner"
   ): TypedContractMethod<[], [string], "view">;
+  getFunction(
+    nameOrSignature: "pause"
+  ): TypedContractMethod<[], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "paused"
+  ): TypedContractMethod<[], [boolean], "view">;
+  getFunction(
+    nameOrSignature: "pokeFallbackPrice"
+  ): TypedContractMethod<[newPriceUSD: BigNumberish], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "receiveFlashLoan"
   ): TypedContractMethod<
@@ -364,11 +435,18 @@ export interface BalancerFlashLoanArb extends BaseContract {
     "nonpayable"
   >;
   getFunction(
-    nameOrSignature: "renounceOwnership"
-  ): TypedContractMethod<[], [void], "nonpayable">;
+    nameOrSignature: "setTrustedSpender"
+  ): TypedContractMethod<
+    [spender: AddressLike, trusted: boolean],
+    [void],
+    "nonpayable"
+  >;
   getFunction(
-    nameOrSignature: "transferOwnership"
-  ): TypedContractMethod<[newOwner: AddressLike], [void], "nonpayable">;
+    nameOrSignature: "trustedSpenders"
+  ): TypedContractMethod<[arg0: AddressLike], [boolean], "view">;
+  getFunction(
+    nameOrSignature: "unpause"
+  ): TypedContractMethod<[], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "withdraw"
   ): TypedContractMethod<[tokenAddress: AddressLike], [void], "nonpayable">;
@@ -379,6 +457,13 @@ export interface BalancerFlashLoanArb extends BaseContract {
     EmergencyWithdrawEvent.InputTuple,
     EmergencyWithdrawEvent.OutputTuple,
     EmergencyWithdrawEvent.OutputObject
+  >;
+  getEvent(
+    key: "FallbackPriceUpdated"
+  ): TypedContractEvent<
+    FallbackPriceUpdatedEvent.InputTuple,
+    FallbackPriceUpdatedEvent.OutputTuple,
+    FallbackPriceUpdatedEvent.OutputObject
   >;
   getEvent(
     key: "FlashLoanExecuted"
@@ -395,11 +480,32 @@ export interface BalancerFlashLoanArb extends BaseContract {
     OwnershipTransferredEvent.OutputObject
   >;
   getEvent(
+    key: "Paused"
+  ): TypedContractEvent<
+    PausedEvent.InputTuple,
+    PausedEvent.OutputTuple,
+    PausedEvent.OutputObject
+  >;
+  getEvent(
     key: "SwapExecuted"
   ): TypedContractEvent<
     SwapExecutedEvent.InputTuple,
     SwapExecutedEvent.OutputTuple,
     SwapExecutedEvent.OutputObject
+  >;
+  getEvent(
+    key: "TrustedSpenderUpdated"
+  ): TypedContractEvent<
+    TrustedSpenderUpdatedEvent.InputTuple,
+    TrustedSpenderUpdatedEvent.OutputTuple,
+    TrustedSpenderUpdatedEvent.OutputObject
+  >;
+  getEvent(
+    key: "Unpaused"
+  ): TypedContractEvent<
+    UnpausedEvent.InputTuple,
+    UnpausedEvent.OutputTuple,
+    UnpausedEvent.OutputObject
   >;
 
   filters: {
@@ -414,7 +520,18 @@ export interface BalancerFlashLoanArb extends BaseContract {
       EmergencyWithdrawEvent.OutputObject
     >;
 
-    "FlashLoanExecuted(address,uint256,uint256,uint256)": TypedContractEvent<
+    "FallbackPriceUpdated(uint256,uint256)": TypedContractEvent<
+      FallbackPriceUpdatedEvent.InputTuple,
+      FallbackPriceUpdatedEvent.OutputTuple,
+      FallbackPriceUpdatedEvent.OutputObject
+    >;
+    FallbackPriceUpdated: TypedContractEvent<
+      FallbackPriceUpdatedEvent.InputTuple,
+      FallbackPriceUpdatedEvent.OutputTuple,
+      FallbackPriceUpdatedEvent.OutputObject
+    >;
+
+    "FlashLoanExecuted(address,uint256,uint256,uint256,uint256,uint256,uint256,uint256)": TypedContractEvent<
       FlashLoanExecutedEvent.InputTuple,
       FlashLoanExecutedEvent.OutputTuple,
       FlashLoanExecutedEvent.OutputObject
@@ -436,6 +553,17 @@ export interface BalancerFlashLoanArb extends BaseContract {
       OwnershipTransferredEvent.OutputObject
     >;
 
+    "Paused(address)": TypedContractEvent<
+      PausedEvent.InputTuple,
+      PausedEvent.OutputTuple,
+      PausedEvent.OutputObject
+    >;
+    Paused: TypedContractEvent<
+      PausedEvent.InputTuple,
+      PausedEvent.OutputTuple,
+      PausedEvent.OutputObject
+    >;
+
     "SwapExecuted(address,address,uint256,uint256,address)": TypedContractEvent<
       SwapExecutedEvent.InputTuple,
       SwapExecutedEvent.OutputTuple,
@@ -445,6 +573,28 @@ export interface BalancerFlashLoanArb extends BaseContract {
       SwapExecutedEvent.InputTuple,
       SwapExecutedEvent.OutputTuple,
       SwapExecutedEvent.OutputObject
+    >;
+
+    "TrustedSpenderUpdated(address,bool)": TypedContractEvent<
+      TrustedSpenderUpdatedEvent.InputTuple,
+      TrustedSpenderUpdatedEvent.OutputTuple,
+      TrustedSpenderUpdatedEvent.OutputObject
+    >;
+    TrustedSpenderUpdated: TypedContractEvent<
+      TrustedSpenderUpdatedEvent.InputTuple,
+      TrustedSpenderUpdatedEvent.OutputTuple,
+      TrustedSpenderUpdatedEvent.OutputObject
+    >;
+
+    "Unpaused(address)": TypedContractEvent<
+      UnpausedEvent.InputTuple,
+      UnpausedEvent.OutputTuple,
+      UnpausedEvent.OutputObject
+    >;
+    Unpaused: TypedContractEvent<
+      UnpausedEvent.InputTuple,
+      UnpausedEvent.OutputTuple,
+      UnpausedEvent.OutputObject
     >;
   };
 }

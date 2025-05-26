@@ -28,6 +28,8 @@ export type { IVault } from "./@balancer-labs/v2-interfaces/contracts/vault/IVau
 export { IVault__factory } from "./factories/@balancer-labs/v2-interfaces/contracts/vault/IVault__factory";
 export type { Ownable } from "./@openzeppelin/contracts/access/Ownable";
 export { Ownable__factory } from "./factories/@openzeppelin/contracts/access/Ownable__factory";
+export type { Pausable } from "./@openzeppelin/contracts/utils/Pausable";
+export { Pausable__factory } from "./factories/@openzeppelin/contracts/utils/Pausable__factory";
 export type { ReentrancyGuard } from "./@openzeppelin/contracts/utils/ReentrancyGuard";
 export { ReentrancyGuard__factory } from "./factories/@openzeppelin/contracts/utils/ReentrancyGuard__factory";
 export type { AggregatorV3Interface } from "./contracts/BalancerFlashLoanArb.sol/AggregatorV3Interface";

@@ -3,3 +3,9 @@
 /* eslint-disable */
 export type { AggregatorV3Interface } from "./AggregatorV3Interface";
 export type { BalancerFlashLoanArb } from "./BalancerFlashLoanArb";
+export type { IERC20 } from "./IERC20";
+export type { IFlashLoanRecipient } from "./IFlashLoanRecipient";
+export type { IProtocolFeesCollector } from "./IProtocolFeesCollector";
+export type { IVault } from "./IVault";
+export type { Ownable } from "./Ownable";
+export type { Pausable } from "./Pausable";
