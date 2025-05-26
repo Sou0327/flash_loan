@@ -102,6 +102,11 @@ const FORK_CONFIG = {
   }
 };
 
+// 自動引き出し設定
+const AUTO_WITHDRAW_THRESHOLD = parseFloat(process.env.AUTO_WITHDRAW_THRESHOLD || "1000"); // $1000
+const AUTO_WITHDRAW_TOKEN = process.env.AUTO_WITHDRAW_TOKEN || USDC; // デフォルトはUSDC
+const AUTO_WITHDRAW_ENABLED = process.env.AUTO_WITHDRAW_ENABLED === "true";
+
 // 0x Protocol API設定
 const apiKey = process.env.ZX_API_KEY!; // 0x APIキー
 const chainId = "1";
@@ -707,6 +712,9 @@ async function executeArbitrage(
       STATE.totalProfit += netProfit;
       console.log(`📊 Total profit: $${STATE.totalProfit.toFixed(2)}`);
       
+      // 自動引き出しチェック
+      await autoWithdraw();
+      
     } else {
       console.log(`❌ Transaction failed`);
     }
@@ -788,6 +796,16 @@ async function main() {
   console.log(`📊 ${NETWORK_NAME} ${IS_FORK_ENVIRONMENT ? '🧪' : '🔴'} | Contract: ${BALANCER_FLASH_ARB}`);
   console.log(`⚙️  Min Profit: ${IS_FORK_ENVIRONMENT ? FORK_CONFIG.PROFIT.MIN_PERCENTAGE : CONFIG.PROFIT.MIN_PERCENTAGE}% | Mode: ${IS_TEST_MODE ? "TEST" : "LIVE"}`);
   
+  // 自動引き出し設定表示
+  if (AUTO_WITHDRAW_ENABLED) {
+    const tokenName = AUTO_WITHDRAW_TOKEN === USDC ? 'USDC' : 
+                     AUTO_WITHDRAW_TOKEN === DAI ? 'DAI' : 
+                     AUTO_WITHDRAW_TOKEN === WETH ? 'WETH' : 'TOKEN';
+    console.log(`💸 Auto-withdraw: $${AUTO_WITHDRAW_THRESHOLD} in ${tokenName}`);
+  } else {
+    console.log(`💸 Auto-withdraw: DISABLED`);
+  }
+  
   // 初期残高表示
   const balance = await provider.getBalance(wallet.address);
   console.log(`💰 Balance: ${ethers.formatEther(balance)} ETH`);
@@ -814,6 +832,62 @@ function displayPerformanceStats() {
   console.log(`⏱️  ${runtime.toFixed(1)}min | 💰 $${STATE.totalProfit.toFixed(2)} | 📈 ${STATE.successfulTransactions}/${STATE.totalTransactions} (${successRate.toFixed(1)}%)`);
   console.log(`💰 $/hour: $${(STATE.totalProfit / runtime * 60).toFixed(2)} | 🧱 Block: ${STATE.lastBlockNumber}`);
   console.log("===============\n");
+}
+
+// 自動引き出し関数
+async function autoWithdraw(): Promise<void> {
+  if (!AUTO_WITHDRAW_ENABLED) {
+    return;
+  }
+  
+  if (STATE.totalProfit < AUTO_WITHDRAW_THRESHOLD) {
+    return;
+  }
+  
+  try {
+    console.log(`\n💸 Auto-withdrawal triggered! Profit: $${STATE.totalProfit.toFixed(2)}`);
+    
+    // 引き出し前の残高確認
+    const tokenContract = new ethers.Contract(
+      AUTO_WITHDRAW_TOKEN,
+      ["function balanceOf(address) view returns (uint256)"],
+      provider
+    );
+    
+    const balanceBefore = await tokenContract.balanceOf(BALANCER_FLASH_ARB);
+    console.log(`💰 Contract balance before: ${ethers.formatUnits(balanceBefore, 6)} tokens`);
+    
+    if (balanceBefore === 0n) {
+      console.log("⚠️  No tokens to withdraw");
+      return;
+    }
+    
+    // 引き出し実行
+    const tx = await flashArb.withdraw(AUTO_WITHDRAW_TOKEN);
+    console.log(`📜 Withdrawal TX: ${tx.hash}`);
+    
+    const receipt = await tx.wait();
+    
+    if (receipt.status === 1) {
+      // 引き出し後の残高確認
+      const balanceAfter = await tokenContract.balanceOf(BALANCER_FLASH_ARB);
+      const withdrawnAmount = balanceBefore - balanceAfter;
+      
+      console.log(`✅ Auto-withdrawal successful!`);
+      console.log(`💵 Withdrawn: ${ethers.formatUnits(withdrawnAmount, 6)} tokens`);
+      console.log(`⛽ Gas used: ${receipt.gasUsed.toString()}`);
+      
+      // 統計をリセット（引き出し後）
+      STATE.totalProfit = 0;
+      console.log(`📊 Profit counter reset`);
+      
+    } else {
+      console.log(`❌ Auto-withdrawal transaction failed`);
+    }
+    
+  } catch (error) {
+    console.error("⚠️  Auto-withdrawal failed:", error instanceof Error ? error.message : String(error));
+  }
 }
 
 main().catch((e) => {
