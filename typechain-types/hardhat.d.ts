@@ -58,6 +58,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.ReentrancyGuard__factory>;
     getContractFactory(
+      name: "AggregatorV3Interface",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.AggregatorV3Interface__factory>;
+    getContractFactory(
       name: "BalancerFlashLoanArb",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.BalancerFlashLoanArb__factory>;
@@ -118,6 +122,11 @@ declare module "hardhat/types/runtime" {
       signer?: ethers.Signer
     ): Promise<Contracts.ReentrancyGuard>;
     getContractAt(
+      name: "AggregatorV3Interface",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.AggregatorV3Interface>;
+    getContractAt(
       name: "BalancerFlashLoanArb",
       address: string | ethers.Addressable,
       signer?: ethers.Signer
@@ -168,6 +177,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.ReentrancyGuard>;
     deployContract(
+      name: "AggregatorV3Interface",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.AggregatorV3Interface>;
+    deployContract(
       name: "BalancerFlashLoanArb",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.BalancerFlashLoanArb>;
@@ -227,6 +240,11 @@ declare module "hardhat/types/runtime" {
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.ReentrancyGuard>;
+    deployContract(
+      name: "AggregatorV3Interface",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.AggregatorV3Interface>;
     deployContract(
       name: "BalancerFlashLoanArb",
       args: any[],

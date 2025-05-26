@@ -1,8 +1,14 @@
 import { ethers } from "ethers";
-import { FlashbotsBundleProvider } from '@flashbots/ethers-provider-bundle';
 import { z } from 'zod';
 import { startMetricsServer, updateMetrics } from './metrics';
 import * as dotenv from "dotenv";
+
+// Node.js環境でfetchを利用可能にする（Node18+では不要）
+if (typeof fetch === 'undefined') {
+  const nodeFetch = require('node-fetch');
+  globalThis.fetch = nodeFetch;
+}
+
 dotenv.config();
 
 // プライベートキーの検証（厳格）
@@ -16,28 +22,6 @@ if (!PRIVATE_KEY || PRIVATE_KEY.length !== 66) {
 const RPC_URL = process.env.MAINNET_RPC || process.env.ALCHEMY_WSS?.replace('wss://', 'https://');
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-
-// Flashbots設定（MEV保護）
-let flashbotsProvider: FlashbotsBundleProvider | null = null;
-const FLASHBOTS_ENABLED = process.env.FLASHBOTS_ENABLED === "true";
-
-async function initFlashbots() {
-  if (!FLASHBOTS_ENABLED || IS_FORK_ENVIRONMENT) {
-    return;
-  }
-  
-  try {
-    flashbotsProvider = await FlashbotsBundleProvider.create(
-      provider,
-      wallet,
-      'https://relay.flashbots.net',
-      'mainnet'
-    );
-    console.log("🛡️  Flashbots MEV protection enabled");
-  } catch (error) {
-    console.warn("⚠️  Flashbots initialization failed, using public mempool");
-  }
-}
 
 // フォーク環境の検出（より厳密に）
 const IS_FORK_ENVIRONMENT = (RPC_URL?.includes('127.0.0.1') || 
@@ -76,9 +60,9 @@ const CONFIG = {
   
   // ガス設定（現実的な値）
   GAS: {
-    LIMIT: 400000n,           // 実測値に基づく
-    MAX_PRICE_GWEI: 25,       // 少し高めに調整
-    PRIORITY_FEE_GWEI: 1.5,   // MEV保護用の優先料金
+    LIMIT: BigInt(400000),        // 実測値に基づく
+    MAX_PRICE_GWEI: 25,           // 少し高めに調整
+    PRIORITY_FEE_GWEI: 1.5,       // MEV保護用の優先料金
   },
   
   // 利益設定（動的計算）
@@ -106,16 +90,29 @@ const STATE = {
   successfulTransactions: 0,
   lastBlockNumber: 0,
   startTime: Date.now(),
-  gasHistory: [] as Array<{ gasUsedUSD: number; timestamp: number; blockNumber: number }>,
+  gasHistory: [] as Array<{ gasUsedUSD: bigint; timestamp: number; blockNumber: number }>,
   avgGasUSD: 0,
 };
 
 // ガス履歴の管理
 const GAS_HISTORY_SIZE = 20; // 過去20件の平均を使用
+let lastResetTime = Date.now(); // 最後のリセット時刻
 
-function updateGasHistory(gasUsedUSD: number, blockNumber: number) {
+function updateGasHistory(gasUsedWei: bigint, gasPriceWei: bigint, ethPriceUSD: number, blockNumber: number) {
+  // 24時間ごとにガス履歴をリセット（メモリ肥大対策）
+  const now = Date.now();
+  if (now - lastResetTime > 24 * 60 * 60 * 1000) { // 24時間
+    STATE.gasHistory.length = 0;
+    lastResetTime = now;
+    console.log("📊 Gas history reset (24h cleanup)");
+  }
+  
+  // BigIntで安全に計算（桁あふれ対策）
+  const ethPriceScaled = BigInt(Math.round(ethPriceUSD * 1e8)); // 8桁精度
+  const gasUsedUSDScaled = (gasUsedWei * gasPriceWei * ethPriceScaled) / (BigInt(1e18) * BigInt(1e8));
+  
   STATE.gasHistory.push({
-    gasUsedUSD,
+    gasUsedUSD: gasUsedUSDScaled,
     timestamp: Date.now(),
     blockNumber
   });
@@ -125,10 +122,13 @@ function updateGasHistory(gasUsedUSD: number, blockNumber: number) {
     STATE.gasHistory.shift();
   }
   
-  // 平均ガス代を更新
-  STATE.avgGasUSD = STATE.gasHistory.reduce((sum, entry) => sum + entry.gasUsedUSD, 0) / STATE.gasHistory.length;
+  // 平均ガス代を更新（シンプルなBigInt→Number変換）
+  const totalGasUSD = STATE.gasHistory.reduce((sum, entry) => sum + entry.gasUsedUSD, BigInt(0));
+  const avgGasUSDScaled = totalGasUSD / BigInt(STATE.gasHistory.length);
+  STATE.avgGasUSD = Number(avgGasUSDScaled) / 1e18; // 直接変換（オーバーフロー範囲外）
   
-  console.log(`⛽ Gas used: $${gasUsedUSD.toFixed(2)} | Avg: $${STATE.avgGasUSD.toFixed(2)}`);
+  const gasUsedUSDNumber = Number(gasUsedUSDScaled) / 1e18;
+  console.log(`⛽ Gas used: $${gasUsedUSDNumber.toFixed(2)} | Avg: $${STATE.avgGasUSD.toFixed(2)}`);
 }
 
 // 設定（旧設定を削除）
@@ -158,17 +158,56 @@ const AUTO_WITHDRAW_ENABLED = process.env.AUTO_WITHDRAW_ENABLED === "true";
 const apiKey = process.env.ZX_API_KEY!; // 0x APIキー
 const chainId = "1";
 
+// API プロバイダーの型定義
+interface ApiProvider {
+  name: string;
+  baseUrl: string;
+  headers: Record<string, string>;
+  buildPriceUrl: (params: URLSearchParams) => string;
+  buildQuoteUrl: (params: URLSearchParams) => string;
+  rateLimitHeaders: {
+    remaining: string;
+    reset: string;
+  };
+}
+
 // API フェイルオーバー設定
-const API_PROVIDERS = [
+const API_PROVIDERS: ApiProvider[] = [
   {
     name: "0x",
     baseUrl: "https://api.0x.org/swap/v1",
-    headers: { '0x-api-key': apiKey }
+    headers: { '0x-api-key': apiKey },
+    buildPriceUrl: (params: URLSearchParams) => `https://api.0x.org/swap/v1/price?${params.toString()}`,
+    buildQuoteUrl: (params: URLSearchParams) => `https://api.0x.org/swap/v1/quote?${params.toString()}`,
+    rateLimitHeaders: {
+      remaining: 'x-ratelimit-remaining',
+      reset: 'x-ratelimit-reset'
+    }
   },
   {
     name: "1inch",
     baseUrl: "https://api.1inch.dev/swap/v5.2/1",
-    headers: { 'Authorization': `Bearer ${process.env.ONEINCH_API_KEY}` }
+    headers: { 'Authorization': `Bearer ${process.env.ONEINCH_API_KEY}` },
+    buildPriceUrl: (params: URLSearchParams) => {
+      // 1inch用のパラメータ変換
+      const fromToken = params.get('sellToken');
+      const toToken = params.get('buyToken');
+      const amount = params.get('sellAmount');
+      return `https://api.1inch.dev/swap/v5.2/1/quote?fromTokenAddress=${fromToken}&toTokenAddress=${toToken}&amount=${amount}`;
+    },
+    buildQuoteUrl: (params: URLSearchParams) => {
+      // 1inch用のパラメータ変換
+      const fromToken = params.get('sellToken');
+      const toToken = params.get('buyToken');
+      const amount = params.get('sellAmount');
+      const slippage = params.get('slippagePercentage') || '1'; // デフォルト1%
+      const from = params.get('takerAddress');
+      return `https://api.1inch.dev/swap/v5.2/1/swap?fromTokenAddress=${fromToken}&toTokenAddress=${toToken}&amount=${amount}&fromAddress=${from}&slippage=${slippage}`;
+    },
+    rateLimitHeaders: {
+      remaining: 'x-rate-limit-remaining',
+      reset: 'x-rate-limit-reset'
+    }
   }
 ];
 
@@ -178,7 +217,6 @@ const rateLimitState = new Map<string, { resetTime: number; remaining: number }>
 // Rate-limit対応のfetch
 async function fetchWithRateLimit(url: string, options: any, retries = 3): Promise<any> {
   const provider = API_PROVIDERS[currentProviderIndex];
-  const fullUrl = url.replace("https://api.0x.org/swap/v1", provider.baseUrl);
   
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -192,16 +230,23 @@ async function fetchWithRateLimit(url: string, options: any, retries = 3): Promi
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
       
-      const response = await fetch(fullUrl, {
+      const response = await fetch(url, {
         ...options,
-        headers: { ...options.headers, ...provider.headers }
+        headers: provider.headers // 完全にprovider.headersで置き換え
       });
       
-      // Rate-limit ヘッダーを保存
-      const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '100');
-      const resetTime = parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000;
+      // Rate-limit ヘッダーを保存（provider別）
+      const remainingHeader = provider.rateLimitHeaders.remaining;
+      const resetHeader = provider.rateLimitHeaders.reset;
       
-      rateLimitState.set(rateLimitKey, { resetTime, remaining });
+      const remaining = Number(response.headers.get(remainingHeader) ?? '100');
+      const resetTime = Number(response.headers.get(resetHeader) ?? '0') * 1000;
+      
+      // NaN耐性チェック
+      const safeRemaining = isNaN(remaining) ? 100 : remaining;
+      const safeResetTime = isNaN(resetTime) ? Date.now() + 60000 : resetTime; // 1分後にリセット
+      
+      rateLimitState.set(rateLimitKey, { resetTime: safeResetTime, remaining: safeRemaining });
       
       if (response.status === 429) {
         const retryAfter = parseInt(response.headers.get('retry-after') || '1') * 1000;
@@ -238,8 +283,8 @@ async function fetchWithRateLimit(url: string, options: any, retries = 3): Promi
 
 // Zodスキーマ定義（0x APIレスポンス検証）
 const ZxPriceSchema = z.object({
-  buyAmount: z.string(),
-  sellAmount: z.string(),
+  buyAmount: z.union([z.string(), z.number()]).transform(v => String(v)),
+  sellAmount: z.union([z.string(), z.number()]).transform(v => String(v)),
   price: z.string().optional(),
   guaranteedPrice: z.string().optional(),
 });
@@ -248,9 +293,9 @@ const ZxQuoteSchema = z.object({
   data: z.string(),
   to: z.string(),
   allowanceTarget: z.string(),
-  estimatedGas: z.string().optional(),
-  buyAmount: z.string(),
-  sellAmount: z.string(),
+  estimatedGas: z.union([z.string(), z.number()]).transform(v => String(v)).optional(),
+  buyAmount: z.union([z.string(), z.number()]).transform(v => String(v)),
+  sellAmount: z.union([z.string(), z.number()]).transform(v => String(v)),
 });
 
 type ZxPriceResponse = z.infer<typeof ZxPriceSchema>;
@@ -472,8 +517,9 @@ function checkSlippage(
   returnAmount: bigint,
   maxSlippagePercent: number = CONFIG.EXECUTION.MAX_SLIPPAGE
 ): boolean {
-  const slippage = Number(borrowAmount - returnAmount) / Number(borrowAmount) * 100;
-  return Math.abs(slippage) <= maxSlippagePercent;
+  // 返却額が借入額より多いほど正の値（利益）
+  const slippagePct = (Number(returnAmount) - Number(borrowAmount)) / Number(borrowAmount) * 100;
+  return slippagePct >= -maxSlippagePercent; // -1% まで許容（損失限定）
 }
 
 // 動的な最小利益率の計算（estimatedGasベース）
@@ -492,7 +538,7 @@ async function calculateMinProfitPercentage(
   const ethPriceUSD = await getETHPriceUSDCached();
   
   // estimatedGasがある場合はそれを使用、なければデフォルト値
-  let totalGasEstimate = Number(CONFIG.GAS.LIMIT);
+  let totalGasEstimate = Number(CONFIG.GAS.LIMIT); // 400,000 < 2^53-1なので安全
   
   if (firstSwap?.estimatedGas && secondSwap?.estimatedGas) {
     const gas1 = parseInt(firstSwap.estimatedGas);
@@ -522,17 +568,19 @@ async function calculateMinProfitPercentage(
   return Math.max(0.2, Math.min(3.0, calculatedPercentage));
 }
 
-// 利益計算
-function calculateProfit(
+// 利益計算（USD建て）
+function calculateProfitUSD(
   borrowAmount: bigint,
   returnAmount: bigint,
-  borrowDecimals: number
-): { profit: number; percentage: number } {
+  borrowDecimals: number,
+  tokenPriceUSD: number
+): { profitUSD: number; percentage: number } {
   const borrowed = Number(borrowAmount) / (10 ** borrowDecimals);
   const returned = Number(returnAmount) / (10 ** borrowDecimals);
-  const profit = returned - borrowed;
-  const percentage = (profit / borrowed) * 100;
-  return { profit, percentage };
+  const profitTokens = returned - borrowed;
+  const profitUSD = profitTokens * tokenPriceUSD;
+  const percentage = (profitTokens / borrowed) * 100;
+  return { profitUSD, percentage };
 }
 
 // 0x Protocol APIでスワップパスをチェック
@@ -542,7 +590,7 @@ async function checkSwapPath(
   amount: bigint
 ): Promise<{ toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string } | null> {
   try {
-    const base = "https://api.0x.org/swap/v1";
+    const provider = API_PROVIDERS[currentProviderIndex];
     
     // 1. Price取得（見積もり用）
     const priceParams = new URLSearchParams({
@@ -551,12 +599,11 @@ async function checkSwapPath(
       sellAmount: amount.toString()
     });
     
+    const priceUrl = provider.buildPriceUrl(priceParams);
     const priceResponse = await fetchWithRateLimit(
-      `${base}/price?${priceParams.toString()}`,
+      priceUrl,
       {
-        headers: { 
-          '0x-api-key': apiKey
-        },
+        headers: provider.headers,
       }
     );
     
@@ -583,15 +630,21 @@ async function checkSwapPath(
       buyToken: toToken,
       sellAmount: amount.toString(),
       takerAddress: BALANCER_FLASH_ARB,
-      slippagePercentage: (CONFIG.EXECUTION.MAX_SLIPPAGE / 100).toString()
+      slippagePercentage: (CONFIG.EXECUTION.MAX_SLIPPAGE / 100).toString(),
+      // TODO: Permit2期限付き承認を有効化
+      // permitDetails: JSON.stringify({
+      //   asset: fromToken,
+      //   amount: amount.toString(),
+      //   expiration: Math.floor(Date.now() / 1000) + 600, // 10分
+      //   nonce: 0
+      // })
     });
     
+    const quoteUrl = provider.buildQuoteUrl(quoteParams);
     const quoteResponse = await fetchWithRateLimit(
-      `${base}/quote?${quoteParams.toString()}`,
+      quoteUrl,
       {
-        headers: { 
-          '0x-api-key': apiKey
-        },
+        headers: provider.headers,
       }
     );
     
@@ -612,12 +665,18 @@ async function checkSwapPath(
       return null;
     }
 
+    // 1inch APIの場合はestimatedGasが無いので固定値を設定
+    let estimatedGas = validatedQuoteData.data.estimatedGas;
+    if (provider.name === '1inch' && !estimatedGas) {
+      estimatedGas = "200000"; // 1inch用の固定ガス見積もり（20万ガス）
+    }
+
     return {
       toAmount: BigInt(validatedPriceData.data.buyAmount),
       calldata: validatedQuoteData.data.data,
       target: validatedQuoteData.data.to,
       allowanceTarget: validatedQuoteData.data.allowanceTarget || validatedQuoteData.data.to,
-      estimatedGas: validatedQuoteData.data.estimatedGas
+      estimatedGas: estimatedGas
     };
   } catch (error) {
     return null;
@@ -630,7 +689,7 @@ async function checkArbitragePath(path: ArbPath, gasPriceGwei: number): Promise<
   opportunity?: {
     firstSwap: { toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string };
     secondSwap: { toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string };
-    profit: number;
+    profitUSD: number;
     percentage: number;
     minPercentage: number;
   };
@@ -659,11 +718,13 @@ async function checkArbitragePath(path: ArbPath, gasPriceGwei: number): Promise<
       return { path, error: "Second swap failed" };
     }
 
-    // 3. 利益計算
-    const { profit, percentage } = calculateProfit(
+    // 3. 利益計算（USD建て）
+    const tokenPrice = await getTokenPriceUSDCached(path.borrowToken);
+    const { profitUSD, percentage } = calculateProfitUSD(
       path.borrowAmount,
       secondSwap.toAmount,
-      path.borrowDecimals
+      path.borrowDecimals,
+      tokenPrice
     );
 
     // 3.1. スリッページチェック
@@ -672,7 +733,6 @@ async function checkArbitragePath(path: ArbPath, gasPriceGwei: number): Promise<
     }
 
     // 4. 動的な最小利益率を計算
-    const tokenPrice = await getTokenPriceUSDCached(path.borrowToken);
     const borrowAmountUSD = Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)) * tokenPrice;
     const minPercentage = await calculateMinProfitPercentage(
       gasPriceGwei,
@@ -686,7 +746,7 @@ async function checkArbitragePath(path: ArbPath, gasPriceGwei: number): Promise<
       opportunity: {
         firstSwap,
         secondSwap,
-        profit,
+        profitUSD,
         percentage,
         minPercentage
       }
@@ -704,9 +764,15 @@ async function checkArbitrage() {
   const startTime = Date.now();
   
   // 現在のガス価格を取得
-  const feeData = await provider.getFeeData();
+  const feeData = await currentProvider.getFeeData();
   const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
-  const gasPriceGwei = gasPrice ? Number(gasPrice) / 1e9 : 20;
+  
+  if (!gasPrice) {
+    console.warn("⚠️  Failed to get gas price, using default 20 Gwei");
+    return; // ガス価格が取得できない場合はスキップ
+  }
+  
+  const gasPriceGwei = parseFloat(ethers.formatUnits(gasPrice, 'gwei'));
   
   // ETH価格を取得
   const ethPrice = await getETHPriceUSDCached();
@@ -728,7 +794,7 @@ async function checkArbitrage() {
   for (const result of results) {
     if (result.opportunity) {
       const { path, opportunity } = result;
-      const { firstSwap, secondSwap, profit, percentage, minPercentage } = opportunity;
+      const { firstSwap, secondSwap, profitUSD, percentage, minPercentage } = opportunity;
       
       if (percentage > minPercentage) {
         opportunitiesFound++;
@@ -744,9 +810,7 @@ async function checkArbitrage() {
         
         console.log(`💰 Borrowing: ${ethers.formatUnits(path.borrowAmount, path.borrowDecimals)} ${borrowTokenName}`);
         
-        const tokenPrice = await getTokenPriceUSDCached(path.borrowToken);
-        const borrowAmountUSD = Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)) * tokenPrice;
-        console.log(`💵 Expected profit: $${(profit * (borrowAmountUSD / Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)))).toFixed(2)}`);
+        console.log(`💵 Expected profit: $${profitUSD.toFixed(2)}`);
         console.log(`⛽ Gas: ${gasPriceGwei.toFixed(2)} Gwei`);
         
         // メトリクス更新
@@ -758,7 +822,7 @@ async function checkArbitrage() {
           console.log(`⚠️  TEST MODE - monitoring only`);
         } else {
           // 実際のアービトラージ実行
-          await executeArbitrage(path, firstSwap, secondSwap, profit);
+          await executeArbitrage(path, firstSwap, secondSwap, profitUSD);
         }
       } else {
         // マイナス利益は簡潔に表示（1行のみ）
@@ -787,7 +851,7 @@ async function executeArbitrage(
   path: ArbPath,
   firstSwap: { toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string },
   secondSwap: { toAmount: bigint; calldata: string; target: string; allowanceTarget: string; estimatedGas?: string },
-  expectedProfit: number
+  expectedProfitUSD: number
 ) {
   try {
     console.log(`🚀 Executing ${path.name}...`);
@@ -799,7 +863,7 @@ async function executeArbitrage(
     }
     
     // ガス価格チェック
-    const feeData = await provider.getFeeData();
+    const feeData = await currentProvider.getFeeData();
     const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
     
     if (!gasPrice) {
@@ -807,28 +871,37 @@ async function executeArbitrage(
       return;
     }
 
-    const gasPriceGwei = Number(gasPrice) / 1e9;
+    const gasPriceGwei = parseFloat(ethers.formatUnits(gasPrice, 'gwei'));
     
     if (gasPriceGwei > CONFIG.GAS.MAX_PRICE_GWEI) {
       console.log(`⚠️  Gas too high: ${gasPriceGwei.toFixed(2)} Gwei`);
       return;
     }
 
-    // 利益がガス代を十分上回るかチェック
-    const estimatedGasCost = Number(CONFIG.GAS.LIMIT) * gasPriceGwei / 1e9 * 3000; // USD
-    if (expectedProfit < estimatedGasCost * 2) {
-      console.log(`⚠️  Profit too low vs gas cost`);
+    // 利益がガス代を十分上回るかチェック（USD建て統一）
+    const ethPriceUSD = await getETHPriceUSDCached();
+    
+    // 実際のガス見積もりを使用
+    let totalGasEstimate = Number(CONFIG.GAS.LIMIT);
+    if (firstSwap.estimatedGas && secondSwap.estimatedGas) {
+      const gas1 = parseInt(firstSwap.estimatedGas);
+      const gas2 = parseInt(secondSwap.estimatedGas);
+      totalGasEstimate = gas1 + gas2 + 100000; // フラッシュローンオーバーヘッド
+    }
+    
+    const estimatedGasCost = totalGasEstimate * gasPriceGwei / 1e9 * ethPriceUSD;
+    
+    if (expectedProfitUSD < estimatedGasCost * 2) {
+      console.log(`⚠️  Profit too low vs gas cost: $${expectedProfitUSD.toFixed(2)} < $${(estimatedGasCost * 2).toFixed(2)}`);
       return;
     }
 
-    console.log(`💰 Expected: $${expectedProfit.toFixed(2)} | Gas: $${estimatedGasCost.toFixed(2)}`);
+    console.log(`💰 Expected: $${expectedProfitUSD.toFixed(2)} | Gas: $${estimatedGasCost.toFixed(2)}`);
 
-    // フラッシュローンを実行
-    const tokens = [path.borrowToken];
-    const amounts = [path.borrowAmount];
-    
-    // minProfitBpsを計算（ベーシスポイント）
-    const minProfitBps = Math.floor(CONFIG.EXECUTION.MAX_SLIPPAGE * 100); // 1% = 100bps
+    // minProfitBpsをUSD相当分に計算
+    const tokenPrice = await getTokenPriceUSDCached(path.borrowToken);
+    const borrowAmountUSD = Number(ethers.formatUnits(path.borrowAmount, path.borrowDecimals)) * tokenPrice;
+    const minProfitBps = calculateMinProfitBpsFromUSD(expectedProfitUSD, borrowAmountUSD);
     
     // 新しい形式でuserDataを作成：[allowanceTarget1, data1, allowanceTarget2, data2]
     const userData = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -836,82 +909,37 @@ async function executeArbitrage(
       [firstSwap.allowanceTarget, firstSwap.calldata, secondSwap.allowanceTarget, secondSwap.calldata]
     );
     
-    // MEV保護：優先料金を動的に調整
-    const priorityFee = Math.max(
-      CONFIG.GAS.PRIORITY_FEE_GWEI,
-      gasPriceGwei * 0.1 // ベースガス価格の10%
-    );
+    // Priority Fee上限チェック（EIP-1559対応）
+    const maxFeeGwei = Number(ethers.formatUnits(feeData.maxFeePerGas || BigInt(0), 'gwei'));
     
-    // ガス見積もりを動的に取得
-    let gasLimit = CONFIG.GAS.LIMIT;
-    try {
-      const estimatedGas = await flashArb.executeFlashLoan.estimateGas(
-        tokens,
-        amounts,
-        minProfitBps,
-        userData
-      );
-      // 10%のバッファを追加
-      gasLimit = (estimatedGas * 110n) / 100n;
-      console.log(`⛽ Estimated gas: ${estimatedGas.toString()} (with buffer: ${gasLimit.toString()})`);
-    } catch (error) {
-      console.log(`⚠️  Gas estimation failed, using default: ${gasLimit.toString()}`);
-    }
+    // baseFeeの取得（ethers v6では直接取得できないため、推定値を使用）
+    const baseFeeGwei = feeData.maxFeePerGas && feeData.maxPriorityFeePerGas ?
+      Number(ethers.formatUnits(feeData.maxFeePerGas - feeData.maxPriorityFeePerGas, 'gwei')) :
+      Number(ethers.formatUnits(feeData.gasPrice || BigInt(0), 'gwei')); // フォールバック
     
-    const tx = await flashArb.executeFlashLoan(
-      tokens,
-      amounts,
+    // priorityFee ≤ maxFee - baseFee を確実に守る
+    const maxPriorityGwei = Math.max(0, maxFeeGwei - baseFeeGwei);
+    const priorityFeeGwei = Math.min(gasPriceGwei * 2, maxPriorityGwei * 0.9);
+    
+    // MEV保護：高い優先料金で送信
+    const mevProtectedTx = await currentFlashArb.executeFlashLoan(
+      [path.borrowToken],
+      [path.borrowAmount],
       minProfitBps,
       userData,
       {
         maxFeePerGas: feeData.maxFeePerGas,
-        maxPriorityFeePerGas: ethers.parseUnits(priorityFee.toString(), "gwei"),
-        gasLimit: gasLimit
+        maxPriorityFeePerGas: ethers.parseUnits(priorityFeeGwei.toFixed(1), 'gwei'),
+        gasLimit: BigInt(totalGasEstimate) // 実際のガス見積もりを使用
       }
     );
     
-    console.log(`📜 TX: ${tx.hash}`);
-    
-    // Flashbotsを使用してMEV保護
-    if (flashbotsProvider && !IS_FORK_ENVIRONMENT) {
-      try {
-        const targetBlockNumber = await provider.getBlockNumber() + 1;
-        const bundle = [
-          {
-            signedTransaction: await wallet.signTransaction({
-              to: BALANCER_FLASH_ARB,
-              data: flashArb.interface.encodeFunctionData("executeFlashLoan", [
-                tokens,
-                amounts,
-                minProfitBps,
-                userData
-              ]),
-              maxFeePerGas: feeData.maxFeePerGas,
-              maxPriorityFeePerGas: ethers.parseUnits(priorityFee.toString(), "gwei"),
-              gasLimit: gasLimit,
-              nonce: await wallet.getNonce()
-            })
-          }
-        ];
-        
-        const bundleResponse = await flashbotsProvider.sendBundle(bundle, targetBlockNumber);
-        console.log(`🛡️  Flashbots bundle submitted for block ${targetBlockNumber}`);
-        
-        // 簡単な成功チェック
-        if ('error' in bundleResponse) {
-          console.warn(`⚠️  Flashbots error: ${bundleResponse.error.message}`);
-        } else {
-          console.log(`✅ Flashbots bundle accepted`);
-        }
-      } catch (flashbotsError) {
-        console.warn(`⚠️  Flashbots failed, using public mempool:`, flashbotsError);
-      }
-    }
+    console.log(`🚀 TX: ${mevProtectedTx.hash}`);
     
     // トランザクション数をカウント
     STATE.totalTransactions++;
     
-    const receipt = await tx.wait();
+    const receipt = await mevProtectedTx.wait();
     
     if (receipt.status === 1) {
       STATE.successfulTransactions++; // 成功カウント
@@ -920,9 +948,10 @@ async function executeArbitrage(
       
       // 実際の利益を計算（ガス代を差し引く）
       const gasUsed = receipt.gasUsed * receipt.gasPrice;
-      const gasCostUSD = Number(gasUsed) / 1e18 * 3000; // ETH価格を$3000と仮定
+      const ethPriceUSD = await getETHPriceUSDCached(); // 統一されたETH価格を使用
+      const gasCostUSD = Number(gasUsed) / 1e18 * ethPriceUSD;
       
-      const netProfit = expectedProfit - gasCostUSD;
+      const netProfit = expectedProfitUSD - gasCostUSD;
       console.log(`💵 Net profit: $${netProfit.toFixed(2)}`);
       
       // 成功率の追跡
@@ -933,7 +962,7 @@ async function executeArbitrage(
       await autoWithdraw();
       
       // ガス履歴の更新
-      updateGasHistory(gasCostUSD, receipt.blockNumber);
+      updateGasHistory(receipt.gasUsed, receipt.gasPrice || BigInt(0), ethPriceUSD, receipt.blockNumber);
       
     } else {
       console.log(`❌ Transaction failed`);
@@ -949,6 +978,10 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 5000; // 5秒
 
+// グローバルプロバイダーとコントラクト参照
+let currentProvider = provider;
+let currentFlashArb = flashArb;
+
 async function reconnectProvider(): Promise<void> {
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
     console.error("❌ Max reconnection attempts reached. Exiting...");
@@ -961,15 +994,20 @@ async function reconnectProvider(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
   
   try {
-    // 新しいプロバイダーを作成
+    // 新しいプロバイダーとコントラクトを作成
     const newProvider = new ethers.JsonRpcProvider(RPC_URL);
+    const newWallet = new ethers.Wallet(PRIVATE_KEY!, newProvider);
+    const newFlashArb = new ethers.Contract(BALANCER_FLASH_ARB, abi, newWallet);
     
     // 接続テスト
     await newProvider.getBlockNumber();
     
-    // 成功したら古いプロバイダーを置き換え
-    provider.removeAllListeners();
-    Object.setPrototypeOf(provider, newProvider);
+    // 古いプロバイダーのリスナーを削除
+    currentProvider.removeAllListeners();
+    
+    // グローバル参照を更新
+    currentProvider = newProvider;
+    currentFlashArb = newFlashArb;
     
     console.log("✅ Reconnected successfully!");
     reconnectAttempts = 0; // リセット
@@ -985,13 +1023,13 @@ async function reconnectProvider(): Promise<void> {
 
 function setupProviderListeners(): void {
   // エラーハンドリング
-  provider.on("error", async (error) => {
+  currentProvider.on("error", async (error) => {
     console.error("🔌 Provider error:", error.message);
     await reconnectProvider();
   });
   
   // ブロック監視
-  provider.on("block", async (blockNumber) => {
+  currentProvider.on("block", async (blockNumber) => {
     try {
       // 3ブロックごとにスキャン
       if (blockNumber % CONFIG.MONITORING.BLOCK_INTERVAL === 0) {
@@ -1016,9 +1054,6 @@ async function main() {
   console.log(`📊 ${NETWORK_NAME} ${IS_FORK_ENVIRONMENT ? '🧪' : '🔴'} | Contract: ${BALANCER_FLASH_ARB}`);
   console.log(`⚙️  Min Profit: ${IS_FORK_ENVIRONMENT ? FORK_CONFIG.PROFIT.MIN_PERCENTAGE : CONFIG.PROFIT.MIN_PERCENTAGE}% | Mode: ${IS_TEST_MODE ? "TEST" : "LIVE"}`);
   
-  // Flashbots初期化
-  await initFlashbots();
-  
   // メトリクスサーバー起動
   if (process.env.METRICS_ENABLED === "true") {
     startMetricsServer();
@@ -1035,7 +1070,7 @@ async function main() {
   }
   
   // 初期残高表示
-  const balance = await provider.getBalance(wallet.address);
+  const balance = await currentProvider.getBalance(wallet.address);
   console.log(`💰 Balance: ${ethers.formatEther(balance)} ETH`);
   
   if (IS_FORK_ENVIRONMENT) {
@@ -1079,19 +1114,23 @@ async function autoWithdraw(): Promise<void> {
     const tokenContract = new ethers.Contract(
       AUTO_WITHDRAW_TOKEN,
       ["function balanceOf(address) view returns (uint256)"],
-      provider
+      currentProvider
     );
     
     const balanceBefore = await tokenContract.balanceOf(BALANCER_FLASH_ARB);
-    console.log(`💰 Contract balance before: ${ethers.formatUnits(balanceBefore, 6)} tokens`);
     
-    if (balanceBefore === 0n) {
+    // トークンのdecimals取得（動的）
+    const decimals = await getTokenDecimals(AUTO_WITHDRAW_TOKEN);
+    
+    console.log(`💰 Contract balance before: ${ethers.formatUnits(balanceBefore, decimals)} tokens`);
+    
+    if (balanceBefore === BigInt(0)) {
       console.log("⚠️  No tokens to withdraw");
       return;
     }
     
     // 引き出し実行
-    const tx = await flashArb.withdraw(AUTO_WITHDRAW_TOKEN);
+    const tx = await currentFlashArb.withdraw(AUTO_WITHDRAW_TOKEN);
     console.log(`📜 Withdrawal TX: ${tx.hash}`);
     
     const receipt = await tx.wait();
@@ -1102,7 +1141,7 @@ async function autoWithdraw(): Promise<void> {
       const withdrawnAmount = balanceBefore - balanceAfter;
       
       console.log(`✅ Auto-withdrawal successful!`);
-      console.log(`💵 Withdrawn: ${ethers.formatUnits(withdrawnAmount, 6)} tokens`);
+      console.log(`💵 Withdrawn: ${ethers.formatUnits(withdrawnAmount, decimals)} tokens`);
       console.log(`⛽ Gas used: ${receipt.gasUsed.toString()}`);
       
       // 統計をリセット（引き出し後）
@@ -1116,6 +1155,54 @@ async function autoWithdraw(): Promise<void> {
   } catch (error) {
     console.error("⚠️  Auto-withdrawal failed:", error instanceof Error ? error.message : String(error));
   }
+}
+
+// トークンdecimals キャッシュ
+const decimalsCache = new Map<string, number>();
+
+// トークンのdecimalsを取得（キャッシュ付き）
+async function getTokenDecimals(tokenAddress: string): Promise<number> {
+  const cacheKey = tokenAddress.toLowerCase();
+  const cached = decimalsCache.get(cacheKey);
+  
+  if (cached !== undefined) {
+    return cached;
+  }
+  
+  try {
+    // IERC20Metadata.decimals()を呼び出し
+    const tokenContract = new ethers.Contract(
+      tokenAddress,
+      ["function decimals() view returns (uint8)"],
+      currentProvider
+    );
+    
+    const decimals = await tokenContract.decimals();
+    decimalsCache.set(cacheKey, decimals);
+    return decimals;
+    
+  } catch (error) {
+    // フォールバック：既知のトークンのdecimals
+    const fallbackDecimals = tokenAddress === USDC || tokenAddress === USDT ? 6 :
+                             tokenAddress === WBTC ? 8 : 18;
+    decimalsCache.set(cacheKey, fallbackDecimals);
+    return fallbackDecimals;
+  }
+}
+
+// minProfitBpsをUSD相当分に変換（slippage対応）
+function calculateMinProfitBpsFromUSD(
+  expectedProfitUSD: number,
+  borrowAmountUSD: number,
+  safetyMarginBps: number = 150 // 1.5%の安全マージン（MEV・slippage対応）
+): number {
+  const profitPercentage = (expectedProfitUSD / borrowAmountUSD) * 100;
+  
+  // 実際のfilled amountが滑ることを考慮して、より保守的に設定（70%）
+  const conservativeProfitBps = Math.ceil(profitPercentage * 100 * 0.7) - safetyMarginBps;
+  
+  // 最小10bps（0.1%）、最大1000bps（10%）に制限
+  return Math.max(10, Math.min(1000, conservativeProfitBps));
 }
 
 main().catch((e) => {

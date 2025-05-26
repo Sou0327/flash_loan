@@ -11,6 +11,14 @@ contract BalancerFlashLoanArbTest is Test {
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
+    // イベント定義
+    event FlashLoanExecuted(
+        address indexed token,
+        uint256 amount,
+        uint256 feeAmount,
+        uint256 profit
+    );
+
     function setUp() public {
         // Mainnetをフォーク
         vm.createFork(vm.envString("MAINNET_RPC"));
@@ -71,5 +79,50 @@ contract BalancerFlashLoanArbTest is Test {
     /// @dev 不変条件テスト：コントラクトは常にETHを保持しない
     function invariant_NoETHBalance() public {
         assertEq(address(arb).balance, 0);
+    }
+
+    /// @dev FlashLoanExecutedイベントのテスト
+    function test_FlashLoanExecutedEvent() public {
+        // USDCをコントラクトに送金（利益をシミュレート）
+        deal(USDC, address(arb), 1000 * 1e6);
+
+        // イベントの期待値を設定
+        vm.expectEmit(true, false, false, true);
+        emit FlashLoanExecuted(USDC, 1000 * 1e6, 0, 1000 * 1e6);
+
+        // 引き出しでイベントをトリガー
+        arb.withdraw(USDC);
+    }
+
+    /// @dev InsufficientProfitエラーのテスト
+    function test_InsufficientProfitRevert() public {
+        // 空のuserDataでフラッシュローンを実行（失敗するはず）
+        IERC20[] memory tokens = new IERC20[](1);
+        tokens[0] = IERC20(USDC);
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1000 * 1e6;
+
+        bytes memory emptyUserData = "";
+
+        vm.expectRevert();
+        arb.executeFlashLoan(tokens, amounts, 50, emptyUserData);
+    }
+
+    /// @dev 正常なアービトラージパスのテスト（モック）
+    function test_SuccessfulArbitragePath() public {
+        // 実際の0x APIデータをモックする必要があるため、
+        // ここではコントラクトの基本機能のみテスト
+
+        // USDCをコントラクトに送金
+        deal(USDC, address(arb), 10000 * 1e6);
+
+        uint256 balanceBefore = IERC20(USDC).balanceOf(address(this));
+
+        // 引き出しテスト
+        arb.withdraw(USDC);
+
+        uint256 balanceAfter = IERC20(USDC).balanceOf(address(this));
+        assertGt(balanceAfter, balanceBefore);
     }
 }

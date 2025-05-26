@@ -1,4 +1,4 @@
-import express from 'express';
+import express = require('express');
 import { register, Counter, Gauge, Histogram } from 'prom-client';
 
 const app = express();
@@ -101,7 +101,7 @@ export function updateMetrics(data: {
 }
 
 // メトリクスエンドポイント
-app.get('/metrics', async (req, res) => {
+app.get('/metrics', async (req: express.Request, res: express.Response) => {
   try {
     res.set('Content-Type', register.contentType);
     res.end(await register.metrics());
@@ -111,7 +111,7 @@ app.get('/metrics', async (req, res) => {
 });
 
 // ヘルスチェック
-app.get('/health', (req, res) => {
+app.get('/health', (req: express.Request, res: express.Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 

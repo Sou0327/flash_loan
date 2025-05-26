@@ -21,16 +21,52 @@ interface AggregatorV3Interface {
         );
 }
 
+// SafeERC20の簡易実装（forceApprove用）
+library SafeERC20 {
+    function forceApprove(
+        IERC20 token,
+        address spender,
+        uint256 value
+    ) internal {
+        // 最初に0にリセット（USDT等対応）
+        if (value > 0 && token.allowance(address(this), spender) > 0) {
+            (bool resetSuccess, bytes memory resetData) = address(token).call(
+                abi.encodeWithSelector(token.approve.selector, spender, 0)
+            );
+            require(
+                resetSuccess &&
+                    (resetData.length == 0 || abi.decode(resetData, (bool))),
+                "Reset approval failed"
+            );
+        }
+
+        // 実際の承認
+        (bool success, bytes memory returndata) = address(token).call(
+            abi.encodeWithSelector(token.approve.selector, spender, value)
+        );
+        require(
+            success &&
+                (returndata.length == 0 || abi.decode(returndata, (bool))),
+            "Approval failed"
+        );
+    }
+}
+
 contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     IVault private immutable vault;
 
     // Chainlink価格フィード（ETH/USD）
     AggregatorV3Interface private constant ETH_USD_FEED =
         AggregatorV3Interface(0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419);
 
-    // 0x Protocol Permit2 Contract
-    address public constant PERMIT2_CONTRACT =
-        0x000000000022D473030F116dDEE9F6B43aC78BA3;
+    // 主要トークンアドレス（immutable配列の代替）
+    address private immutable DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
+    address private immutable WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address private immutable USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address private immutable WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+    address private immutable USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
 
     // イベント
     event FlashLoanExecuted(
@@ -38,6 +74,13 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 feeAmount,
         uint256 profit
+    );
+    event SwapExecuted(
+        address indexed srcToken,
+        address indexed dstToken,
+        uint256 inAmount,
+        uint256 outAmount,
+        address indexed target
     );
     event EmergencyWithdraw(address indexed token, uint256 amount);
 
@@ -56,7 +99,7 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
     }
 
     /// @notice フラッシュローンを実行
-    /// @param tokens 借りるトークンの配列（通常は1つのトークン）
+    /// @param tokens 借りるトークンの配列（単一トークンのみ対応）
     /// @param amounts 借りる量の配列
     /// @param minProfitBps 最小利益率（ベーシスポイント、例：50 = 0.5%）
     /// @param swapData 0x Protocolのスワップデータ
@@ -67,7 +110,8 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         bytes memory swapData
     ) external onlyOwner nonReentrant {
         require(tokens.length == amounts.length, "Array length mismatch");
-        require(tokens.length > 0, "Empty arrays");
+        require(tokens.length == 1, "Only single token flash loan supported");
+        require(amounts[0] > 0, "Amount must be greater than zero");
         require(minProfitBps <= 1000, "Max 10% slippage"); // 最大10%
 
         // minProfitBpsを保存
@@ -87,103 +131,286 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         // Balancer Vaultからの呼び出しのみ許可
         if (msg.sender != address(vault)) revert Unauthorized();
 
+        // minProfitBpsが初期化されていることを確認
+        require(currentMinProfitBps != 0, "MinProfitBps not initialized");
+
         // 単一トークンのアービトラージを想定
         IERC20 cachedToken = tokens[0]; // ガス最適化：storage読み取り削減
         uint256 cachedAmount = amounts[0];
 
+        // minProfitBpsを読み取り後すぐにクリア（re-entrancy対策）
+        uint256 localMinProfitBps = currentMinProfitBps;
+        currentMinProfitBps = 0;
+
+        // アービトラージを実行（エラー時も確実にクリア済み）
+        try
+            this._executeArbitrageExternal(
+                cachedToken,
+                cachedAmount,
+                feeAmounts[0],
+                localMinProfitBps,
+                userData
+            )
+        {
+            // 成功時は何もしない
+        } catch (bytes memory reason) {
+            // エラー時もcurrentMinProfitBpsは既にクリア済み
+            assembly {
+                revert(add(reason, 0x20), mload(reason))
+            }
+        }
+    }
+
+    /// @notice 外部呼び出し用のラッパー関数（try-catch用）
+    function _executeArbitrageExternal(
+        IERC20 cachedToken,
+        uint256 cachedAmount,
+        uint256 feeAmount,
+        uint256 localMinProfitBps,
+        bytes memory userData
+    ) external {
+        require(msg.sender == address(this), "Only self call");
+        _executeArbitrage(
+            cachedToken,
+            cachedAmount,
+            feeAmount,
+            localMinProfitBps,
+            userData
+        );
+    }
+
+    /// @notice アービトラージ実行の内部関数
+    function _executeArbitrage(
+        IERC20 cachedToken,
+        uint256 cachedAmount,
+        uint256 feeAmount,
+        uint256 localMinProfitBps,
+        bytes memory userData
+    ) internal {
         // 開始時の残高を記録
         uint256 balanceBefore = cachedToken.balanceOf(address(this));
 
-        // userDataから0x APIのスワップデータをデコード
-        // 新しい形式：[allowanceTarget1, swapData1, allowanceTarget2, swapData2]
-        (
-            address allowanceTarget1,
-            bytes memory swapData1,
-            address allowanceTarget2,
-            bytes memory swapData2
-        ) = abi.decode(userData, (address, bytes, address, bytes));
-
-        // 最初のスワップのためにallowanceTargetへの承認
-        require(
-            cachedToken.approve(allowanceTarget1, cachedAmount),
-            "Approval failed"
+        // スワップデータをデコードして実行
+        (address allowanceTarget1, address allowanceTarget2) = _executeSwaps(
+            cachedToken,
+            cachedAmount,
+            userData
         );
 
-        // 最初のスワップを実行（例：USDC → 中間トークン）
+        // 最終チェックと返済
+        _finalizeArbitrage(
+            cachedToken,
+            cachedAmount,
+            feeAmount,
+            balanceBefore,
+            localMinProfitBps,
+            allowanceTarget1,
+            allowanceTarget2
+        );
+    }
+
+    /// @notice スワップ実行の内部関数
+    function _executeSwaps(
+        IERC20 cachedToken,
+        uint256 cachedAmount,
+        bytes memory userData
+    ) internal returns (address allowanceTarget1, address allowanceTarget2) {
+        // userDataから0x APIのスワップデータをデコード
+        bytes memory swapData1;
+        bytes memory swapData2;
+        (allowanceTarget1, swapData1, allowanceTarget2, swapData2) = abi.decode(
+            userData,
+            (address, bytes, address, bytes)
+        );
+
+        // 最初のスワップ実行
+        _executeFirstSwap(
+            cachedToken,
+            cachedAmount,
+            allowanceTarget1,
+            swapData1
+        );
+
+        // 2番目のスワップ実行
+        _executeSecondSwap(cachedToken, allowanceTarget2, swapData2);
+    }
+
+    /// @notice 最初のスワップ実行
+    function _executeFirstSwap(
+        IERC20 cachedToken,
+        uint256 cachedAmount,
+        address allowanceTarget1,
+        bytes memory swapData1
+    ) internal {
+        // 安全な承認（USDT等のnon-zero→non-zero問題対応）
+        cachedToken.forceApprove(allowanceTarget1, cachedAmount);
+
+        // スワップ前の残高記録
+        uint256 balanceBefore = cachedToken.balanceOf(address(this));
+
+        // スワップ実行
         (bool success1, ) = allowanceTarget1.call(swapData1);
         if (!success1) revert SwapFailed();
 
-        // 効率化：スワップ後に実際に受け取ったトークンのみを承認
-        _approveIntermediateTokens(cachedToken, allowanceTarget2);
+        // スワップ後の残高と中間トークンを特定
+        uint256 balanceAfter = cachedToken.balanceOf(address(this));
+        uint256 inputAmount = balanceBefore - balanceAfter;
 
-        // 2番目のスワップを実行（中間トークン → 元のトークン）
+        // 中間トークンと出力量を特定
+        (
+            address intermediateToken,
+            uint256 outputAmount
+        ) = _findIntermediateToken(cachedToken);
+
+        // イベント発行
+        emit SwapExecuted(
+            address(cachedToken),
+            intermediateToken,
+            inputAmount,
+            outputAmount,
+            allowanceTarget1
+        );
+    }
+
+    /// @notice 2番目のスワップ実行
+    function _executeSecondSwap(
+        IERC20 cachedToken,
+        address allowanceTarget2,
+        bytes memory swapData2
+    ) internal {
+        // 中間トークンと入力量を特定
+        (
+            address intermediateToken,
+            uint256 inputAmount
+        ) = _findIntermediateToken(cachedToken);
+
+        // allowanceTargetに対して中間トークンを一括承認（安全かつガス効率的）
+        if (intermediateToken != address(0) && inputAmount > 0) {
+            IERC20(intermediateToken).forceApprove(
+                allowanceTarget2,
+                inputAmount
+            );
+        }
+
+        // スワップ前の残高記録
+        uint256 balanceBefore = cachedToken.balanceOf(address(this));
+
+        // スワップ実行
         (bool success2, ) = allowanceTarget2.call(swapData2);
         if (!success2) revert SwapFailed();
 
-        // 承認をリセット（セキュリティ向上）
-        require(
-            cachedToken.approve(allowanceTarget1, 0),
-            "Approval reset failed"
-        );
+        // スワップ後の残高
+        uint256 balanceAfter = cachedToken.balanceOf(address(this));
+        uint256 outputAmount = balanceAfter - balanceBefore;
 
+        // イベント発行
+        emit SwapExecuted(
+            intermediateToken,
+            address(cachedToken),
+            inputAmount,
+            outputAmount,
+            allowanceTarget2
+        );
+    }
+
+    /// @notice 中間トークンを特定する内部関数（残高変化ベース）
+    function _findIntermediateToken(
+        IERC20 excludeToken
+    ) internal view returns (address token, uint256 balance) {
+        address[4] memory checkTokens = [DAI, WETH, USDT, WBTC];
+        uint256 maxBalance = 0;
+        address maxToken = address(0);
+
+        // 最大残高のトークンを特定（複数トークン対応）
+        for (uint256 i = 0; i < checkTokens.length; i++) {
+            if (checkTokens[i] != address(excludeToken)) {
+                uint256 tokenBalance = IERC20(checkTokens[i]).balanceOf(
+                    address(this)
+                );
+                if (tokenBalance > maxBalance) {
+                    maxBalance = tokenBalance;
+                    maxToken = checkTokens[i];
+                }
+            }
+        }
+
+        return (maxToken, maxBalance);
+    }
+
+    /// @notice アービトラージの最終処理
+    function _finalizeArbitrage(
+        IERC20 cachedToken,
+        uint256 cachedAmount,
+        uint256 feeAmount,
+        uint256 balanceBefore,
+        uint256 localMinProfitBps,
+        address allowanceTarget1,
+        address allowanceTarget2
+    ) internal {
         // スワップ後の残高
         uint256 balanceAfter = cachedToken.balanceOf(address(this));
 
-        // 動的スリッページチェック
-        uint256 minExpectedReturn = balanceBefore +
-            (cachedAmount * (10000 - currentMinProfitBps)) /
-            10000;
-        if (balanceAfter < minExpectedReturn) revert InsufficientProfit();
+        // 承認リセット（借入トークン）
+        cachedToken.forceApprove(allowanceTarget1, 0);
+        cachedToken.forceApprove(allowanceTarget2, 0);
 
-        // 利益があることを確認（Balancerは手数料無料）
-        if (balanceAfter <= balanceBefore + cachedAmount)
-            revert InsufficientProfit();
+        // 中間トークンの承認も確実にリセット（残りカス対策）
+        _resetAllIntermediateApprovals(
+            cachedToken,
+            allowanceTarget1,
+            allowanceTarget2
+        );
 
-        // Balancer Vaultへ返済（手数料無料なので元本のみ）
+        // 利益チェック（手数料を考慮）
+        uint256 totalRepayment = cachedAmount + feeAmount;
+
+        // 必要な利益を計算
+        uint256 requiredProfit = (totalRepayment * localMinProfitBps) / 10000;
+        uint256 minimumBalance = balanceBefore +
+            totalRepayment +
+            requiredProfit;
+
+        if (balanceAfter < minimumBalance) revert InsufficientProfit();
+
+        // 返済（手数料込み）
         require(
-            cachedToken.transfer(address(vault), cachedAmount),
+            cachedToken.transfer(address(vault), totalRepayment),
             "Transfer failed"
         );
 
-        // 利益を計算してイベントを発行
-        uint256 profit = balanceAfter - (balanceBefore + cachedAmount);
+        // イベント発行
+        uint256 profit = balanceAfter - (balanceBefore + totalRepayment);
         emit FlashLoanExecuted(
             address(cachedToken),
             cachedAmount,
-            0, // Balancerは手数料無料
+            feeAmount,
             profit
         );
     }
 
-    /// @notice 効率的な中間トークン承認
-    /// @param borrowToken 借入トークン（承認対象外）
-    function _approveIntermediateTokens(
+    /// @notice 全ての中間トークンの承認をリセット（残りカス対策）
+    function _resetAllIntermediateApprovals(
         IERC20 borrowToken,
-        address allowanceTarget
+        address allowanceTarget1,
+        address allowanceTarget2
     ) internal {
-        // 主要トークンのみをチェック（ガス効率化）
-        address[5] memory majorTokens = [
-            0x6B175474E89094C44Da98b954EedeAC495271d0F, // DAI
-            0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, // WETH
-            0xdAC17F958D2ee523a2206206994597C13D831ec7, // USDT
-            0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599, // WBTC
-            0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 // USDC
-        ];
+        address[5] memory majorTokens = [DAI, WETH, USDT, WBTC, USDC];
 
         for (uint256 i = 0; i < majorTokens.length; i++) {
-            if (majorTokens[i] == address(borrowToken)) continue; // 元のトークンはスキップ
+            if (majorTokens[i] == address(borrowToken)) continue;
 
-            IERC20 intermediateToken = IERC20(majorTokens[i]);
-            uint256 balance = intermediateToken.balanceOf(address(this));
+            IERC20 token = IERC20(majorTokens[i]);
 
-            if (balance > 0) {
-                // 残高がある場合のみ承認（ガス効率化）
-                require(
-                    intermediateToken.approve(allowanceTarget, balance),
-                    "Intermediate approval failed"
-                );
-                break; // 最初に見つかった中間トークンのみ承認（通常は1つだけ）
-            }
+            // 両方のallowanceTargetへの承認を一括リセット
+            _resetTokenApproval(token, allowanceTarget1);
+            _resetTokenApproval(token, allowanceTarget2);
+        }
+    }
+
+    /// @notice 単一トークンの承認をリセット（ヘルパー関数）
+    function _resetTokenApproval(IERC20 token, address spender) internal {
+        if (token.allowance(address(this), spender) > 0) {
+            token.forceApprove(spender, 0);
         }
     }
 
@@ -217,8 +444,14 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         }
     }
 
-    /// @notice ETHを受け取れるようにする
-    receive() external payable {}
+    /// @notice ETHを受け取れるようにする（VaultまたはWETHから）
+    receive() external payable {
+        // Vault、またはWETH（0x/1inch unwrap対応）からのみ許可
+        require(
+            msg.sender == address(vault) || msg.sender == WETH,
+            "Only vault or WETH can send ETH"
+        );
+    }
 
     /// @notice ETH/USD価格を取得（Chainlink）
     /// @return price ETH価格（8桁精度、例：300000000000 = $3000.00）
@@ -233,7 +466,7 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         return uint256(answer); // 8桁精度（例：300000000000 = $3000.00）
     }
 
-    /// @notice ガス代をUSD換算で取得
+    /// @notice ガス代をUSD換算で取得（オーバーフロー対策）
     /// @param gasUsed 使用ガス量
     /// @param gasPrice ガス価格（wei）
     /// @return gasCostUSD ガス代のUSD換算（18桁精度）
@@ -242,10 +475,14 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 gasPrice
     ) external view returns (uint256 gasCostUSD) {
         uint256 ethPriceUSD = this.getETHPriceUSD(); // 8桁精度
-        uint256 gasCostWei = gasUsed * gasPrice;
 
-        // gasCostWei (18桁) * ethPriceUSD (8桁) / 1e18 / 1e8 = USD (18桁)
-        gasCostUSD = (gasCostWei * ethPriceUSD) / 1e8;
+        // オーバーフロー対策：段階的に計算
+        // gasUsed * gasPrice * ethPriceUSD / (1e18 * 1e8)
+        require(gasUsed <= type(uint128).max, "gasUsed too large");
+        require(gasPrice <= type(uint128).max, "gasPrice too large");
+
+        uint256 gasCostWei = gasUsed * gasPrice;
+        gasCostUSD = (gasCostWei * ethPriceUSD) / 1e26; // 1e18 * 1e8 = 1e26
 
         return gasCostUSD;
     }
