@@ -63,7 +63,6 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         // 単一トークンのアービトラージを想定
         IERC20 cachedToken = tokens[0]; // ガス最適化：storage読み取り削減
         uint256 cachedAmount = amounts[0];
-        uint256 feeAmount = feeAmounts[0];
 
         // 開始時の残高を記録
         uint256 balanceBefore = cachedToken.balanceOf(address(this));
@@ -101,23 +100,22 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 minExpectedReturn = balanceBefore + (cachedAmount * 995) / 1000;
         if (balanceAfter < minExpectedReturn) revert InsufficientProfit();
 
-        // 利益があることを確認
-        uint256 repayment = cachedAmount + feeAmount;
-        if (balanceAfter <= balanceBefore + repayment)
+        // 利益があることを確認（Balancerは手数料無料）
+        if (balanceAfter <= balanceBefore + cachedAmount)
             revert InsufficientProfit();
 
-        // Balancer Vaultへ返済（元本 + 手数料）
+        // Balancer Vaultへ返済（手数料無料なので元本のみ）
         require(
-            cachedToken.transfer(address(vault), repayment),
+            cachedToken.transfer(address(vault), cachedAmount),
             "Transfer failed"
         );
 
         // 利益を計算してイベントを発行
-        uint256 profit = balanceAfter - (balanceBefore + repayment);
+        uint256 profit = balanceAfter - (balanceBefore + cachedAmount);
         emit FlashLoanExecuted(
             address(cachedToken),
             cachedAmount,
-            feeAmount,
+            0, // Balancerは手数料無料
             profit
         );
     }
