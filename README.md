@@ -4,6 +4,32 @@
 
 包括的なリスク管理機能を搭載したBalancerフラッシュローンアービトラージボットです。
 
+## 🚀 **2025年版 高度戦略対応**
+
+従来の往復アービトラージでは利益が出ない現在の効率的市場に対応した高度戦略を実装：
+
+### 🎯 **実装済み高度戦略**
+
+1. **💰 大型金額アービトラージ**
+   - 50K〜250K USDCでの大型取引
+   - 小額では見えない機会を検出
+   - 価格インパクトを利用
+
+2. **🔺 三角アービトラージ**
+   - A→B→C→A の3トークン循環取引
+   - USDC→WETH→WBTC→USDC等
+   - 高流動性ペアに特化
+
+3. **🔄 代替トークンアービトラージ**
+   - LINK、UNI、AAVE等のアルトコイン
+   - メジャーペア以外での機会発見
+   - ボラティリティを活用
+
+4. **📊 価格インパクト分析**
+   - 大型取引での価格変動を予測
+   - スリッページを利益に転換
+   - 流動性の薄いペアを狙い撃ち
+
 ### 🚀 **クイックスタート**
 
 1. **環境変数設定**
@@ -15,6 +41,11 @@ cp .env.example .env
 PRIVATE_KEY=0x...  # あなたのプライベートキー
 MAINNET_RPC=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 ZX_API_KEY=your_0x_api_key
+
+# 高度戦略を有効化
+USE_ADVANCED_STRATEGIES=true
+AGGRESSIVENESS_LEVEL=3  # 1=保守的, 2=バランス, 3=積極的
+ADVANCED_STRATEGY_INTERVAL=50  # 50ブロックごとに実行
 ```
 
 2. **依存関係インストール**
@@ -27,13 +58,42 @@ npm install
 npm run compile
 ```
 
-4. **実行**
+4. **高度戦略テスト**
 ```bash
-# リスク管理システム付きで実行
+# 高度戦略の機会検出をテスト
+npm run test:advanced
+```
+
+5. **実行**
+```bash
+# リスク管理システム + 高度戦略で実行
 npm run start
 
 # または
 npm run scan
+```
+
+### 🎯 **戦略選択ガイド**
+
+#### **現在の市場状況（2025年）**
+- ✅ **ガス価格**: 超低い (0.8 Gwei)
+- ❌ **往復損失**: 2-3% (従来手法では不可能)
+- ✅ **高度戦略**: 有効
+
+#### **推奨設定**
+
+**保守的運用 (AGGRESSIVENESS_LEVEL=1)**
+```bash
+USE_ADVANCED_STRATEGIES=true
+ADVANCED_STRATEGY_INTERVAL=100  # 100ブロックごと
+MAX_DAILY_LOSS_USD=500
+```
+
+**積極的運用 (AGGRESSIVENESS_LEVEL=3)**
+```bash
+USE_ADVANCED_STRATEGIES=true
+ADVANCED_STRATEGY_INTERVAL=25   # 25ブロックごと
+MAX_DAILY_LOSS_USD=2000
 ```
 
 ### 🛡️ **リスク管理機能**
@@ -65,6 +125,14 @@ npm run scan
 AGGRESSIVENESS_LEVEL=1  # 保守的（3パス、15ブロック間隔）
 AGGRESSIVENESS_LEVEL=2  # バランス（6パス、8ブロック間隔）
 AGGRESSIVENESS_LEVEL=3  # 積極的（8パス、6ブロック間隔）
+```
+
+#### **高度戦略設定**
+```bash
+USE_ADVANCED_STRATEGIES=true           # 高度戦略を有効化
+ADVANCED_STRATEGY_INTERVAL=50          # 実行間隔（ブロック数）
+LARGE_AMOUNT_MIN_USD=50000            # 大型金額の最小値
+TRIANGULAR_MIN_PROFIT_BPS=10          # 三角アービトラージ最小利益率
 ```
 
 #### **自動引き出し**
@@ -99,6 +167,9 @@ curl http://localhost:3001/metrics
 ### 🧪 **テスト実行**
 
 ```bash
+# 高度戦略テスト
+npm run test:advanced
+
 # フォーク環境でテスト
 npm run test:fork
 
@@ -145,6 +216,10 @@ npm run test:fuzz
    - 安定したRPCプロバイダーを使用
    - WebSocket接続の監視
 
+5. **市場効率性**
+   - 2025年現在、従来手法では利益困難
+   - 高度戦略の使用を強く推奨
+
 ### 📞 **サポート**
 
 問題が発生した場合：
@@ -156,6 +231,7 @@ npm run test:fuzz
 
 ### 🔄 **アップデート履歴**
 
+- **v0.3.0** - 高度アービトラージ戦略実装
 - **v0.2.0** - リスク管理システム実装
 - **v0.1.0** - 基本アービトラージ機能
 

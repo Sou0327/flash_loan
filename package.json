@@ -9,6 +9,7 @@
     "test:flashloan": "hardhat run scripts/test-balancer.ts --network fork",
     "test:integration": "ts-node test/integration_test.ts",
     "test:execution": "ts-node scripts/test_execution_process.ts",
+    "test:advanced": "ts-node scripts/test_advanced_strategies.ts",
     "start": "ts-node src/balancer_scanner.ts",
     "scan": "ts-node src/balancer_scanner.ts",
     "test": "hardhat test",
