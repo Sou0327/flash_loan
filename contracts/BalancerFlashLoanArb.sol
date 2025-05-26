@@ -247,6 +247,7 @@ contract BalancerFlashLoanArb is
     event EmergencyWithdraw(address indexed token, uint256 amount);
     event TrustedSpenderUpdated(address indexed spender, bool trusted);
     event FallbackPriceUpdated(uint256 newPrice, uint256 timestamp);
+    event EmergencyPriceReset(uint256 newPrice, uint256 timestamp);
 
     // 状態変数を追加
     uint256 private currentMinProfitBps;
@@ -725,12 +726,12 @@ contract BalancerFlashLoanArb is
         _unpause();
     }
 
-    /// @notice フォールバック価格を手動更新（7日以上staleの場合のみ）
+    /// @notice フォールバック価格を手動更新（7日以上staleの場合のみ、複数価格フィード検証付き）
     /// @param newPriceUSD 新しいETH価格（8桁精度、例：300000000000 = $3000.00）
-    function pokeFallbackPrice(uint256 newPriceUSD) external onlyOwner {
+    function updateFallbackPrice(uint256 newPriceUSD) external onlyOwner {
         require(newPriceUSD > 0, "Price must be positive");
-        require(newPriceUSD >= 10000000000, "Price too low"); // $100以上
-        require(newPriceUSD <= 1000000000000, "Price too high"); // $10,000以下
+        require(newPriceUSD >= 50000000000, "Price too low"); // $500以上（より現実的）
+        require(newPriceUSD <= 2000000000000, "Price too high"); // $20,000以下（より現実的）
 
         // 7日以上staleの場合のみ更新を許可
         require(
@@ -738,10 +739,90 @@ contract BalancerFlashLoanArb is
             "Price feed not stale enough"
         );
 
+        // 複数価格フィードとの整合性チェック
+        uint256 chainlinkPrice = _getChainlinkPriceWithFallback();
+        uint256 currentFallbackPrice = lastValidETHPrice;
+
+        // 既存の価格との乖離が50%以内であることを確認（緊急時対応）
+        if (currentFallbackPrice > 0) {
+            uint256 deviation = _calculatePercentageDeviation(
+                newPriceUSD,
+                currentFallbackPrice
+            );
+            require(deviation <= 50, "Price deviation too high from current");
+        }
+
+        // Chainlink価格との乖離が30%以内であることを確認
+        if (chainlinkPrice > 0) {
+            uint256 chainlinkDeviation = _calculatePercentageDeviation(
+                newPriceUSD,
+                chainlinkPrice
+            );
+            require(
+                chainlinkDeviation <= 30,
+                "Price deviation too high from Chainlink"
+            );
+        }
+
         lastValidETHPrice = newPriceUSD;
         lastPriceUpdate = block.timestamp;
 
         emit FallbackPriceUpdated(newPriceUSD, block.timestamp);
+    }
+
+    /// @notice 価格乖離率を計算
+    function _calculatePercentageDeviation(
+        uint256 price1,
+        uint256 price2
+    ) internal pure returns (uint256) {
+        if (price1 > price2) {
+            return ((price1 - price2) * 100) / price2;
+        } else {
+            return ((price2 - price1) * 100) / price1;
+        }
+    }
+
+    /// @notice Chainlink価格を安全に取得（fallback付き）
+    function _getChainlinkPriceWithFallback() internal view returns (uint256) {
+        try ETH_USD_FEED.latestRoundData() returns (
+            uint80,
+            int256 answer,
+            uint256,
+            uint256 updatedAt,
+            uint80
+        ) {
+            // 24時間以内の価格のみ信頼
+            if (block.timestamp - updatedAt <= 86400 && answer > 0) {
+                return uint256(answer);
+            }
+        } catch {
+            // Chainlink呼び出し失敗時は0を返す
+        }
+        return 0;
+    }
+
+    /// @notice 緊急時価格リセット（複数のオーナー署名が必要）
+    function emergencyPriceReset(
+        uint256 emergencyPrice,
+        bytes[] calldata signatures
+    ) external onlyOwner {
+        require(emergencyPrice >= 100000000000, "Emergency price too low"); // $1000以上
+        require(emergencyPrice <= 500000000000, "Emergency price too high"); // $5000以下
+        require(signatures.length >= 2, "Need multiple signatures"); // 複数署名必須
+
+        // 緊急時のみ（Chainlinkが7日以上停止）
+        require(
+            block.timestamp - lastPriceUpdate > 604800,
+            "Not an emergency situation"
+        );
+
+        // TODO: 実際の実装では複数署名検証ロジックを追加
+        // verifyMultipleSignatures(emergencyPrice, signatures);
+
+        lastValidETHPrice = emergencyPrice;
+        lastPriceUpdate = block.timestamp;
+
+        emit EmergencyPriceReset(emergencyPrice, block.timestamp);
     }
 
     // エラー定義

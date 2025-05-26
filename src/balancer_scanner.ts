@@ -127,6 +127,42 @@ function getAggresiveConfig() {
 
 const ACTIVE_CONFIG = getAggresiveConfig();
 
+// 📊 リスク管理設定
+const RISK_LIMITS = {
+  MAX_DAILY_LOSS_USD: 1000,        // 日次最大損失 $1000
+  MAX_HOURLY_LOSS_USD: 200,        // 時間最大損失 $200  
+  MIN_SUCCESS_RATE: 0.3,           // 最低成功率 30%
+  MAX_PRICE_DEVIATION: 0.05,       // 最大価格乖離 5%
+  MIN_LIQUIDITY_USD: 100000,       // 最小流動性要件 $100k
+  MAX_SLIPPAGE_BPS: 200,           // 最大スリッページ 2%
+  COOLDOWN_AFTER_LOSS_MS: 300000,  // 損失後のクールダウン 5分
+};
+
+// 📈 リスク追跡状態
+const RISK_STATE = {
+  dailyLoss: 0,
+  hourlyLoss: 0,
+  lastLossTime: 0,
+  recentTransactions: [] as Array<{
+    timestamp: number;
+    profit: number;
+    success: boolean;
+  }>,
+  consecutiveFailures: 0,
+};
+
+// 🔄 1時間ごとのリセット
+setInterval(() => {
+  RISK_STATE.hourlyLoss = 0;
+  console.log('📊 Hourly loss counter reset');
+}, 3600000); // 1時間
+
+// 🔄 24時間ごとのリセット  
+setInterval(() => {
+  RISK_STATE.dailyLoss = 0;
+  console.log('📊 Daily loss counter reset');
+}, 86400000); // 24時間
+
 // 実行状態管理（シンプル化）
 const STATE = {
   totalProfit: 0,
@@ -936,7 +972,7 @@ async function checkArbitrage() {
 async function executeArbitrageWithQuotes(
   path: ArbPath,
   expectedProfitUSD: number
-) {
+): Promise<boolean> {
   try {
     console.log(`🧪 Getting quotes for execution: ${path.name}...`);
     
@@ -949,7 +985,7 @@ async function executeArbitrageWithQuotes(
 
     if (!firstSwap) {
       console.log(`❌ Failed to get first swap quote`);
-      return;
+      return false;
     }
 
     const secondSwap = await getQuoteForExecution(
@@ -960,7 +996,7 @@ async function executeArbitrageWithQuotes(
 
     if (!secondSwap) {
       console.log(`❌ Failed to get second swap quote`);
-      return;
+      return false;
     }
 
     console.log(`✅ Got execution quotes successfully`);
@@ -968,7 +1004,7 @@ async function executeArbitrageWithQuotes(
     // 事前チェック：スリッページ再確認
     if (!checkSlippage(path.borrowAmount, secondSwap.toAmount)) {
       console.log(`⚠️  Slippage check failed, aborting`);
-      return;
+      return false;
     }
     
     // ガス価格チェック
@@ -977,14 +1013,14 @@ async function executeArbitrageWithQuotes(
     
     if (!gasPrice) {
       console.error("❌ Failed to get gas price");
-      return;
+      return false;
     }
 
     const gasPriceGwei = parseFloat(ethers.formatUnits(gasPrice, 'gwei'));
     
     if (gasPriceGwei > ACTIVE_CONFIG.GAS.MAX_PRICE_GWEI) {
       console.log(`⚠️  Gas too high: ${gasPriceGwei.toFixed(2)} Gwei`);
-      return;
+      return false;
     }
 
     // 利益がガス代を十分上回るかチェック（BigInt完全移行）
@@ -1010,7 +1046,7 @@ async function executeArbitrageWithQuotes(
     
     if (expectedProfitUSD < estimatedGasCostUSD * gasMultiplier) {
       console.log(`⚠️  Profit too low vs gas cost: $${expectedProfitUSD.toFixed(2)} < $${(estimatedGasCostUSD * gasMultiplier).toFixed(2)} (${gasMultiplier}x)`);
-      return;
+      return false;
     }
 
     console.log(`💰 Expected: $${expectedProfitUSD.toFixed(2)} | Gas: $${estimatedGasCostUSD.toFixed(2)} (${gasMultiplier}x threshold)`);
@@ -1052,7 +1088,7 @@ async function executeArbitrageWithQuotes(
     } catch (simulationError) {
       console.log(`❌ Simulation failed:`, simulationError instanceof Error ? simulationError.message : String(simulationError));
       console.log(`🚫 Aborting real transaction to save gas`);
-      return; // シミュレーション失敗時は実取引を中止
+      return false; // シミュレーション失敗時は実取引を中止
     }
     
     // Priority Fee上限チェック（EIP-1559対応）
@@ -1150,6 +1186,7 @@ async function executeArbitrageWithQuotes(
         gasCostUSD: estimatedGasCostUSD
       });
       
+      return true;
     } else {
       console.log(`❌ Transaction failed`);
       updateMetrics({
@@ -1158,6 +1195,7 @@ async function executeArbitrageWithQuotes(
         failureReason: 'transaction_failed',
         gasCostUSD: estimatedGasCostUSD
       });
+      return false;
     }
 
   } catch (error) {
@@ -1168,6 +1206,7 @@ async function executeArbitrageWithQuotes(
       failureReason: 'execution_error',
       gasCostUSD: 0
     });
+    return false;
   }
 }
 
@@ -1238,7 +1277,7 @@ function setupProviderListeners(): void {
           displayPerformanceStats();
         }
         
-      await checkArbitrage();
+      await checkArbitrageWithRiskManagement();
       }
     } catch (error) {
       console.error(`❌ Block ${blockNumber} error:`, error instanceof Error ? error.message : String(error));
@@ -1552,6 +1591,323 @@ function getCustomErrorName(signature: string): string | null {
   };
   
   return customErrors[signature] || null;
+}
+
+/**
+ * 💡 包括的リスク評価関数
+ */
+async function assessOpportunityRisk(
+  opportunity: {
+    path: ArbPath;
+    profitUSD: number;
+    percentage: number;
+    borrowAmountUSD: number;
+  },
+  gasPriceGwei: number
+): Promise<{
+  shouldExecute: boolean;
+  riskScore: number;
+  warnings: string[];
+  blockingReasons: string[];
+}> {
+  const warnings: string[] = [];
+  const blockingReasons: string[] = [];
+  let riskScore = 0;
+
+  // 1️⃣ 損失制限チェック
+  if (RISK_STATE.dailyLoss >= RISK_LIMITS.MAX_DAILY_LOSS_USD) {
+    blockingReasons.push(`Daily loss limit reached: $${RISK_STATE.dailyLoss.toFixed(2)}`);
+  }
+  
+  if (RISK_STATE.hourlyLoss >= RISK_LIMITS.MAX_HOURLY_LOSS_USD) {
+    blockingReasons.push(`Hourly loss limit reached: $${RISK_STATE.hourlyLoss.toFixed(2)}`);
+  }
+
+  // 2️⃣ 成功率チェック
+  const recentSuccessRate = calculateRecentSuccessRate();
+  if (recentSuccessRate < RISK_LIMITS.MIN_SUCCESS_RATE) {
+    riskScore += 0.3;
+    warnings.push(`Low success rate: ${(recentSuccessRate * 100).toFixed(1)}%`);
+    
+    // 連続失敗が多い場合は一時停止
+    if (RISK_STATE.consecutiveFailures >= 3) {
+      blockingReasons.push(`Too many consecutive failures: ${RISK_STATE.consecutiveFailures}`);
+    }
+  }
+
+  // 3️⃣ クールダウンチェック
+  const timeSinceLastLoss = Date.now() - RISK_STATE.lastLossTime;
+  if (RISK_STATE.lastLossTime > 0 && timeSinceLastLoss < RISK_LIMITS.COOLDOWN_AFTER_LOSS_MS) {
+    const remainingCooldown = Math.ceil((RISK_LIMITS.COOLDOWN_AFTER_LOSS_MS - timeSinceLastLoss) / 1000);
+    blockingReasons.push(`Cooldown active: ${remainingCooldown}s remaining`);
+  }
+
+  // 4️⃣ ガス価格リスク
+  if (gasPriceGwei > ACTIVE_CONFIG.GAS.MAX_PRICE_GWEI * 0.8) {
+    riskScore += 0.2;
+    warnings.push(`High gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
+  }
+
+  // 5️⃣ 利益マージンチェック  
+  const ethPriceUSD = await getETHPriceUSDCached();
+  const estimatedGasCostUSD = (gasPriceGwei * 1e9 * 400000 * ethPriceUSD) / 1e18;
+  const profitMargin = opportunity.profitUSD / estimatedGasCostUSD;
+  
+  if (profitMargin < 3.0) { // ガス代の3倍未満は高リスク
+    riskScore += 0.25;
+    warnings.push(`Low profit margin: ${profitMargin.toFixed(2)}x gas cost`);
+  }
+
+  // 6️⃣ 借入額リスク
+  if (opportunity.borrowAmountUSD > 50000) { // $50k超
+    riskScore += 0.15;
+    warnings.push(`Large position: $${opportunity.borrowAmountUSD.toFixed(0)}`);
+  }
+
+  // 7️⃣ 流動性チェック（簡易版）
+  const estimatedLiquidity = await estimatePoolLiquidity(
+    opportunity.path.borrowToken,
+    opportunity.path.targetToken
+  );
+  
+  if (estimatedLiquidity < RISK_LIMITS.MIN_LIQUIDITY_USD) {
+    riskScore += 0.2;
+    warnings.push(`Low liquidity: $${estimatedLiquidity.toFixed(0)}`);
+  }
+
+  // 8️⃣ 総合判定
+  const shouldExecute = blockingReasons.length === 0 && riskScore < 0.7;
+
+  return {
+    shouldExecute,
+    riskScore,
+    warnings,
+    blockingReasons
+  };
+}
+
+/**
+ * 📊 最近の成功率計算
+ */
+function calculateRecentSuccessRate(): number {
+  const oneHourAgo = Date.now() - 3600000;
+  const recentTxs = RISK_STATE.recentTransactions.filter(tx => tx.timestamp > oneHourAgo);
+  
+  if (recentTxs.length === 0) return 1.0; // データなしの場合は100%とする
+  
+  const successfulTxs = recentTxs.filter(tx => tx.success).length;
+  return successfulTxs / recentTxs.length;
+}
+
+/**
+ * 💧 流動性推定（簡易版）
+ */
+async function estimatePoolLiquidity(token0: string, token1: string): Promise<number> {
+  try {
+    // 大きな額での価格インパクトをチェック
+    const testAmount = ethers.parseUnits("100000", 6); // $100k相当
+    
+    const smallSwap = await checkSwapPathPrice(token0, token1, testAmount);
+    const largeSwap = await checkSwapPathPrice(token0, token1, testAmount * BigInt(10));
+    
+    if (!smallSwap || !largeSwap) return 0;
+    
+    // 価格インパクトから流動性を推定
+    const smallPrice = Number(smallSwap.toAmount) / Number(testAmount);
+    const largePrice = Number(largeSwap.toAmount) / Number(testAmount * BigInt(10));
+    
+    const priceImpact = Math.abs(largePrice - smallPrice) / smallPrice;
+    
+    // 価格インパクトが小さいほど流動性が高い
+    if (priceImpact < 0.01) return 1000000; // $1M+
+    if (priceImpact < 0.05) return 500000;  // $500k
+    if (priceImpact < 0.1) return 100000;   // $100k
+    return 50000; // $50k未満
+    
+  } catch (error) {
+    console.warn('⚠️ Liquidity estimation failed:', error);
+    return 100000; // デフォルト値
+  }
+}
+
+/**
+ * 📝 取引結果の記録
+ */
+function recordTransactionResult(profitUSD: number, success: boolean): void {
+  const transaction = {
+    timestamp: Date.now(),
+    profit: profitUSD,
+    success
+  };
+  
+  RISK_STATE.recentTransactions.push(transaction);
+  
+  // 24時間以上古いデータを削除
+  const oneDayAgo = Date.now() - 86400000;
+  RISK_STATE.recentTransactions = RISK_STATE.recentTransactions.filter(
+    tx => tx.timestamp > oneDayAgo
+  );
+  
+  // 損失の場合の処理
+  if (!success || profitUSD < 0) {
+    const lossAmount = Math.abs(profitUSD);
+    RISK_STATE.dailyLoss += lossAmount;
+    RISK_STATE.hourlyLoss += lossAmount;
+    RISK_STATE.lastLossTime = Date.now();
+    RISK_STATE.consecutiveFailures++;
+    
+    console.log(`📉 Loss recorded: $${lossAmount.toFixed(2)} | Daily: $${RISK_STATE.dailyLoss.toFixed(2)} | Failures: ${RISK_STATE.consecutiveFailures}`);
+  } else {
+    // 成功時は連続失敗回数をリセット
+    RISK_STATE.consecutiveFailures = 0;
+  }
+}
+
+/**
+ * 🚨 基本的なアラート機能
+ */
+async function sendBasicAlert(message: string, level: 'info' | 'warning' | 'error' = 'info'): Promise<void> {
+  const emoji = level === 'error' ? '🚨' : level === 'warning' ? '⚠️' : 'ℹ️';
+  const alertMessage = `${emoji} [${level.toUpperCase()}] ${message}`;
+  
+  console.log(alertMessage);
+  
+  // Slack通知（Webhook URLが設定されている場合）
+  if (process.env.SLACK_WEBHOOK_URL && level !== 'info') {
+    try {
+      await fetch(process.env.SLACK_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: alertMessage,
+          channel: '#arbitrage-alerts'
+        })
+      });
+    } catch (error) {
+      console.warn('⚠️ Failed to send Slack alert:', error);
+    }
+  }
+}
+
+/**
+ * 🛡️ リスク管理対応メイン関数
+ */
+async function checkArbitrageWithRiskManagement(): Promise<void> {
+  try {
+    const currentTime = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    console.log(`🔍 [${currentTime}] Scanning with risk management...`);
+
+    // 現在のガス価格を取得
+    const feeData = await currentProvider.getFeeData();
+    const gasPrice = feeData.gasPrice || feeData.maxFeePerGas;
+    
+    if (!gasPrice) {
+      console.warn("⚠️ Failed to get gas price, using default 20 Gwei");
+      return;
+    }
+    
+    const gasPriceGwei = parseFloat(ethers.formatUnits(gasPrice, 'gwei'));
+    
+    // ガス価格が高すぎる場合はスキップ
+    if (gasPriceGwei > ACTIVE_CONFIG.GAS.MAX_PRICE_GWEI) {
+      await sendBasicAlert(`Gas price too high: ${gasPriceGwei.toFixed(2)} Gwei`, 'warning');
+      return;
+    }
+    
+    const paths = getArbPaths();
+    const maxPaths = AGGRESSIVENESS_LEVEL === 3 ? 8 : AGGRESSIVENESS_LEVEL === 1 ? 3 : 6;
+    const limitedPaths = paths.slice(0, maxPaths);
+
+    // 全パスを順次チェック
+    const opportunities = [];
+    for (const path of limitedPaths) {
+      try {
+        const result = await checkArbitragePath(path, gasPriceGwei);
+        if (result.opportunity) {
+          // 📊 リスク評価を追加
+          const borrowTokenPriceUSD = await getTokenPriceUSDCached(path.borrowToken);
+          const borrowAmountUSD = Number(path.borrowAmount) / Math.pow(10, path.borrowDecimals) * borrowTokenPriceUSD;
+          
+          const riskAssessment = await assessOpportunityRisk({
+            path,
+            profitUSD: result.opportunity.profitUSD,
+            percentage: result.opportunity.percentage,
+            borrowAmountUSD
+          }, gasPriceGwei);
+          
+          if (riskAssessment.shouldExecute) {
+            opportunities.push(result);
+            
+            // 警告がある場合は表示
+            if (riskAssessment.warnings.length > 0) {
+              console.log(`⚠️ Warnings for ${path.name}: ${riskAssessment.warnings.join(', ')}`);
+            }
+          } else {
+            console.log(`🚫 ${path.name} blocked: ${riskAssessment.blockingReasons.join(', ')}`);
+            if (riskAssessment.blockingReasons.length > 0) {
+              await sendBasicAlert(`Execution blocked: ${riskAssessment.blockingReasons[0]}`, 'warning');
+            }
+          }
+        }
+        
+        const interval = AGGRESSIVENESS_LEVEL === 3 ? 800 : AGGRESSIVENESS_LEVEL === 1 ? 1500 : 1000;
+        await new Promise(resolve => setTimeout(resolve, interval));
+        
+      } catch (error) {
+        console.warn(`⚠️ Path ${path.name} failed:`, error instanceof Error ? error.message : String(error));
+        continue;
+      }
+    }
+
+    if (opportunities.length > 0) {
+      console.log(`\n🎯 Found ${opportunities.length} risk-approved opportunities!`);
+      
+      // 最も利益の高い機会を選択
+      const bestOpportunity = opportunities.reduce((best, current) => 
+        current.opportunity!.profitUSD > best.opportunity!.profitUSD ? current : best
+      );
+
+      console.log(`🚀 Best opportunity: ${bestOpportunity.path.name}`);
+      console.log(`💰 Expected profit: $${bestOpportunity.opportunity!.profitUSD.toFixed(2)} (${bestOpportunity.opportunity!.percentage.toFixed(3)}%)`);
+
+      // 大きな利益の場合はアラート送信
+      if (bestOpportunity.opportunity!.profitUSD > 200) {
+        await sendBasicAlert(
+          `Large opportunity found: $${bestOpportunity.opportunity!.profitUSD.toFixed(2)} on ${bestOpportunity.path.name}`,
+          'info'
+        );
+      }
+
+      if (!IS_TEST_MODE) {
+        // アービトラージを実行
+        const executionSuccess = await executeArbitrageWithQuotes(
+          bestOpportunity.path,
+          bestOpportunity.opportunity!.profitUSD
+        );
+        
+        // 📝 結果を記録
+        recordTransactionResult(
+          executionSuccess ? bestOpportunity.opportunity!.profitUSD : -50, // 失敗時は$50の損失と仮定
+          executionSuccess
+        );
+      } else {
+        console.log(`⚠️ TEST MODE - monitoring only`);
+      }
+    } else {
+      console.log(`📉 No profitable opportunities found (or all blocked by risk management)`);
+    }
+
+    // メトリクス更新
+    updateMetrics({
+      activeOpportunities: opportunities.length,
+      gasPrice: gasPriceGwei,
+      ethPrice: await getETHPriceUSDCached()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in checkArbitrageWithRiskManagement:', error instanceof Error ? error.message : String(error));
+    await sendBasicAlert(`System error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  }
 }
 
 main().catch((e) => {

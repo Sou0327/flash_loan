@@ -16,6 +16,22 @@ interface FlashbotsBundleResponse {
   };
 }
 
+interface MEVProtectionConfig {
+  privatePools: string[];
+  maxSlippageForBundle: number;
+  atomicWithdrawal: boolean;
+  multiBuilderSubmission: boolean;
+}
+
+interface BundleTransaction {
+  to: string;
+  data: string;
+  value?: bigint;
+  gasLimit: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+}
+
 // Flashbotsバンドル管理クラス
 export class FlashbotsManager {
   private provider: ethers.JsonRpcProvider;
@@ -23,18 +39,26 @@ export class FlashbotsManager {
   private wallet: ethers.Wallet;
   private flashbotsWallet: ethers.Wallet | null = null;
   private config: ReturnType<typeof getNetworkConfig>;
+  private privatePools: Map<string, ethers.JsonRpcProvider>;
+  private mevConfig: MEVProtectionConfig;
 
   constructor(
     provider: ethers.JsonRpcProvider,
-    wallet: ethers.Wallet
+    wallet: ethers.Wallet,
+    mevConfig: MEVProtectionConfig
   ) {
     this.provider = provider;
     this.wallet = wallet;
     this.config = getNetworkConfig();
+    this.mevConfig = mevConfig;
+    this.privatePools = new Map();
     
     if (this.config.use_flashbots) {
       this.initializeFlashbots();
     }
+    
+    // プライベートプールの初期化
+    this.initializePrivatePools();
   }
 
   /**
@@ -47,6 +71,20 @@ export class FlashbotsManager {
       console.log('🔒 Flashbots provider initialized');
     } catch (error) {
       console.warn('⚠️  Failed to initialize Flashbots:', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private initializePrivatePools() {
+    const poolUrls = {
+      flashbots: process.env.FLASHBOTS_RPC || "https://rpc.flashbots.net",
+      eden: process.env.EDEN_RPC || "https://api.edennetwork.io/v1/rpc",
+      bloxroute: process.env.BLOXROUTE_RPC || "https://mev.api.blxrbdn.com"
+    };
+
+    for (const [name, url] of Object.entries(poolUrls)) {
+      if (this.mevConfig.privatePools.includes(name)) {
+        this.privatePools.set(name, new ethers.JsonRpcProvider(url));
+      }
     }
   }
 
@@ -351,4 +389,248 @@ export class FlashbotsManager {
       }
     }
   }
-} 
+
+  /**
+   * 高度なMEV保護付きトランザクション送信
+   */
+  async executeWithMEVProtection(
+    arbitrageTx: BundleTransaction,
+    withdrawTx?: BundleTransaction
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    try {
+      // 1. アトミックバンドルの作成
+      const bundle = this.createAtomicBundle(arbitrageTx, withdrawTx);
+      
+      // 2. 複数のビルダーに同時送信
+      const results = await Promise.allSettled(
+        Array.from(this.privatePools.keys()).map(poolName => 
+          this.sendToPrivatePool(poolName, bundle)
+        )
+      );
+      
+      // 3. 最初に成功した結果を返す
+      const successfulResult = results.find(r => r.status === 'fulfilled');
+      
+      if (successfulResult && successfulResult.status === 'fulfilled') {
+        return {
+          success: true,
+          txHash: successfulResult.value.txHash
+        };
+      }
+      
+      // 4. フォールバック：パブリックメンプール
+      console.warn('⚠️  All private pools failed, falling back to public mempool');
+      return await this.sendToPublicMempool(arbitrageTx);
+      
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /**
+   * アトミックバンドルの作成
+   */
+  private createAtomicBundle(
+    arbitrageTx: BundleTransaction,
+    withdrawTx?: BundleTransaction
+  ): BundleTransaction[] {
+    const bundle = [arbitrageTx];
+    
+    // 利益即座引き出しオプション
+    if (this.mevConfig.atomicWithdrawal && withdrawTx) {
+      bundle.push(withdrawTx);
+    }
+    
+    return bundle;
+  }
+
+  /**
+   * プライベートプールへの送信
+   */
+  private async sendToPrivatePool(
+    poolName: string,
+    bundle: BundleTransaction[]
+  ): Promise<{ txHash: string }> {
+    const provider = this.privatePools.get(poolName);
+    if (!provider) {
+      throw new Error(`Pool ${poolName} not available`);
+    }
+
+    console.log(`🔒 Sending bundle to ${poolName}...`);
+    
+    // Flashbots特有のバンドル送信ロジック
+    if (poolName === 'flashbots') {
+      return await this.sendFlashbotsBundle(provider, bundle);
+    }
+    
+    // その他のプールは通常の送信（簡略化）
+    const tx = bundle[0]; // 最初のトランザクションのみ
+    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+    
+    const response = await wallet.sendTransaction({
+      to: tx.to,
+      data: tx.data,
+      value: tx.value || 0n,
+      gasLimit: tx.gasLimit,
+      maxFeePerGas: tx.maxFeePerGas,
+      maxPriorityFeePerGas: tx.maxPriorityFeePerGas
+    });
+    
+    return { txHash: response.hash };
+  }
+
+  /**
+   * Flashbots特有のバンドル送信
+   */
+  private async sendFlashbotsBundle(
+    provider: ethers.JsonRpcProvider,
+    bundle: BundleTransaction[]
+  ): Promise<{ txHash: string }> {
+    // Flashbotsバンドル作成（簡略化）
+    const bundleTransactions = bundle.map(tx => ({
+      transaction: {
+        to: tx.to,
+        data: tx.data,
+        value: ethers.toBeHex(tx.value || 0n),
+        gasLimit: ethers.toBeHex(tx.gasLimit),
+        maxFeePerGas: ethers.toBeHex(tx.maxFeePerGas),
+        maxPriorityFeePerGas: ethers.toBeHex(tx.maxPriorityFeePerGas)
+      },
+      signer: new ethers.Wallet(process.env.PRIVATE_KEY!, provider)
+    }));
+
+    // 実際のFlashbots APIコール（eth_sendBundle）
+    const currentBlock = await provider.getBlockNumber();
+    const targetBlock = currentBlock + 1;
+    
+    const bundleRequest = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_sendBundle",
+      params: [{
+        txs: bundleTransactions.map(tx => tx.transaction),
+        blockNumber: ethers.toBeHex(targetBlock)
+      }]
+    };
+
+    // HTTP POSTでFlashbots APIに送信
+    const response = await fetch(provider._getConnection().url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Flashbots-Signature': await this.signFlashbotsRequest(bundleRequest)
+      },
+      body: JSON.stringify(bundleRequest)
+    });
+
+    const result = await response.json() as any;
+    
+    if (result.error) {
+      throw new Error(`Flashbots error: ${result.error.message}`);
+    }
+    
+    // バンドルハッシュを返す（実際のtxHashではない）
+    return { txHash: result.result.bundleHash };
+  }
+
+  /**
+   * Flashbotsリクエスト署名
+   */
+  private async signFlashbotsRequest(request: any): Promise<string> {
+    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY!);
+    const message = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(request)));
+    const signature = await wallet.signMessage(ethers.getBytes(message));
+    return `${wallet.address}:${signature}`;
+  }
+
+  /**
+   * パブリックメンプールへのフォールバック
+   */
+  private async sendToPublicMempool(
+    tx: BundleTransaction
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.MAINNET_RPC);
+      const wallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+      
+      const response = await wallet.sendTransaction({
+        to: tx.to,
+        data: tx.data,
+        value: tx.value || 0n,
+        gasLimit: tx.gasLimit,
+        maxFeePerGas: tx.maxFeePerGas,
+        maxPriorityFeePerGas: tx.maxPriorityFeePerGas
+      });
+      
+      return {
+        success: true,
+        txHash: response.hash
+      };
+      
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /**
+   * 競合トランザクション検出
+   */
+  async detectCompetitorTransactions(): Promise<{
+    competingTxs: number;
+    avgGasPrice: bigint;
+    maxGasPrice: bigint;
+  }> {
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.MAINNET_RPC);
+      
+      // メンプールの分析（簡略化）
+      const pendingBlock = await provider.send("eth_getBlockByNumber", ["pending", true]);
+      const arbitrageTxs = pendingBlock.transactions.filter((tx: any) => 
+        this.isArbitrageTransaction(tx)
+      );
+      
+      if (arbitrageTxs.length === 0) {
+        return { competingTxs: 0, avgGasPrice: 0n, maxGasPrice: 0n };
+      }
+      
+      const gasPrices = arbitrageTxs.map((tx: any) => BigInt(tx.maxFeePerGas || tx.gasPrice));
+      const avgGasPrice = gasPrices.reduce((sum: bigint, price: bigint) => sum + price, 0n) / BigInt(gasPrices.length);
+      const maxGasPrice = gasPrices.reduce((max: bigint, price: bigint) => price > max ? price : max, 0n);
+      
+      return {
+        competingTxs: arbitrageTxs.length,
+        avgGasPrice,
+        maxGasPrice
+      };
+      
+    } catch (error) {
+      console.warn('⚠️  Failed to detect competitor transactions:', error);
+      return { competingTxs: 0, avgGasPrice: 0n, maxGasPrice: 0n };
+    }
+  }
+
+  /**
+   * アービトラージトランザクションの判定
+   */
+  private isArbitrageTransaction(tx: any): boolean {
+    // 簡単な判定ロジック（実際はより複雑）
+    return tx.to && (
+      tx.to.toLowerCase() === process.env.BALANCER_FLASH_ARB?.toLowerCase() ||
+      tx.data?.includes('0x') // スワップ系の関数呼び出し
+    );
+  }
+}
+
+// デフォルト設定
+export const defaultMEVConfig: MEVProtectionConfig = {
+  privatePools: ['flashbots', 'eden'],
+  maxSlippageForBundle: 0.5, // 0.5%
+  atomicWithdrawal: true,
+  multiBuilderSubmission: true
+}; 

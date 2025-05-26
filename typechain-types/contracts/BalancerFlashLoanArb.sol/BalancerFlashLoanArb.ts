@@ -26,6 +26,7 @@ import type {
 export interface BalancerFlashLoanArbInterface extends Interface {
   getFunction(
     nameOrSignature:
+      | "emergencyPriceReset"
       | "emergencyWithdrawMultiple"
       | "executeFlashLoan"
       | "getETHPriceUSD"
@@ -33,16 +34,17 @@ export interface BalancerFlashLoanArbInterface extends Interface {
       | "owner"
       | "pause"
       | "paused"
-      | "pokeFallbackPrice"
       | "receiveFlashLoan"
       | "setTrustedSpender"
       | "trustedSpenders"
       | "unpause"
+      | "updateFallbackPrice"
       | "withdraw"
   ): FunctionFragment;
 
   getEvent(
     nameOrSignatureOrTopic:
+      | "EmergencyPriceReset"
       | "EmergencyWithdraw"
       | "FallbackPriceUpdated"
       | "FlashLoanExecuted"
@@ -53,6 +55,10 @@ export interface BalancerFlashLoanArbInterface extends Interface {
       | "Unpaused"
   ): EventFragment;
 
+  encodeFunctionData(
+    functionFragment: "emergencyPriceReset",
+    values: [BigNumberish, BytesLike[]]
+  ): string;
   encodeFunctionData(
     functionFragment: "emergencyWithdrawMultiple",
     values: [AddressLike[]]
@@ -73,10 +79,6 @@ export interface BalancerFlashLoanArbInterface extends Interface {
   encodeFunctionData(functionFragment: "pause", values?: undefined): string;
   encodeFunctionData(functionFragment: "paused", values?: undefined): string;
   encodeFunctionData(
-    functionFragment: "pokeFallbackPrice",
-    values: [BigNumberish]
-  ): string;
-  encodeFunctionData(
     functionFragment: "receiveFlashLoan",
     values: [AddressLike[], BigNumberish[], BigNumberish[], BytesLike]
   ): string;
@@ -90,10 +92,18 @@ export interface BalancerFlashLoanArbInterface extends Interface {
   ): string;
   encodeFunctionData(functionFragment: "unpause", values?: undefined): string;
   encodeFunctionData(
+    functionFragment: "updateFallbackPrice",
+    values: [BigNumberish]
+  ): string;
+  encodeFunctionData(
     functionFragment: "withdraw",
     values: [AddressLike]
   ): string;
 
+  decodeFunctionResult(
+    functionFragment: "emergencyPriceReset",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "emergencyWithdrawMultiple",
     data: BytesLike
@@ -114,10 +124,6 @@ export interface BalancerFlashLoanArbInterface extends Interface {
   decodeFunctionResult(functionFragment: "pause", data: BytesLike): Result;
   decodeFunctionResult(functionFragment: "paused", data: BytesLike): Result;
   decodeFunctionResult(
-    functionFragment: "pokeFallbackPrice",
-    data: BytesLike
-  ): Result;
-  decodeFunctionResult(
     functionFragment: "receiveFlashLoan",
     data: BytesLike
   ): Result;
@@ -130,7 +136,24 @@ export interface BalancerFlashLoanArbInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "unpause", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "updateFallbackPrice",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "withdraw", data: BytesLike): Result;
+}
+
+export namespace EmergencyPriceResetEvent {
+  export type InputTuple = [newPrice: BigNumberish, timestamp: BigNumberish];
+  export type OutputTuple = [newPrice: bigint, timestamp: bigint];
+  export interface OutputObject {
+    newPrice: bigint;
+    timestamp: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
 }
 
 export namespace EmergencyWithdrawEvent {
@@ -317,6 +340,12 @@ export interface BalancerFlashLoanArb extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
+  emergencyPriceReset: TypedContractMethod<
+    [emergencyPrice: BigNumberish, signatures: BytesLike[]],
+    [void],
+    "nonpayable"
+  >;
+
   emergencyWithdrawMultiple: TypedContractMethod<
     [tokens: AddressLike[]],
     [void],
@@ -348,12 +377,6 @@ export interface BalancerFlashLoanArb extends BaseContract {
 
   paused: TypedContractMethod<[], [boolean], "view">;
 
-  pokeFallbackPrice: TypedContractMethod<
-    [newPriceUSD: BigNumberish],
-    [void],
-    "nonpayable"
-  >;
-
   receiveFlashLoan: TypedContractMethod<
     [
       tokens: AddressLike[],
@@ -375,6 +398,12 @@ export interface BalancerFlashLoanArb extends BaseContract {
 
   unpause: TypedContractMethod<[], [void], "nonpayable">;
 
+  updateFallbackPrice: TypedContractMethod<
+    [newPriceUSD: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+
   withdraw: TypedContractMethod<
     [tokenAddress: AddressLike],
     [void],
@@ -385,6 +414,13 @@ export interface BalancerFlashLoanArb extends BaseContract {
     key: string | FunctionFragment
   ): T;
 
+  getFunction(
+    nameOrSignature: "emergencyPriceReset"
+  ): TypedContractMethod<
+    [emergencyPrice: BigNumberish, signatures: BytesLike[]],
+    [void],
+    "nonpayable"
+  >;
   getFunction(
     nameOrSignature: "emergencyWithdrawMultiple"
   ): TypedContractMethod<[tokens: AddressLike[]], [void], "nonpayable">;
@@ -420,9 +456,6 @@ export interface BalancerFlashLoanArb extends BaseContract {
     nameOrSignature: "paused"
   ): TypedContractMethod<[], [boolean], "view">;
   getFunction(
-    nameOrSignature: "pokeFallbackPrice"
-  ): TypedContractMethod<[newPriceUSD: BigNumberish], [void], "nonpayable">;
-  getFunction(
     nameOrSignature: "receiveFlashLoan"
   ): TypedContractMethod<
     [
@@ -448,9 +481,19 @@ export interface BalancerFlashLoanArb extends BaseContract {
     nameOrSignature: "unpause"
   ): TypedContractMethod<[], [void], "nonpayable">;
   getFunction(
+    nameOrSignature: "updateFallbackPrice"
+  ): TypedContractMethod<[newPriceUSD: BigNumberish], [void], "nonpayable">;
+  getFunction(
     nameOrSignature: "withdraw"
   ): TypedContractMethod<[tokenAddress: AddressLike], [void], "nonpayable">;
 
+  getEvent(
+    key: "EmergencyPriceReset"
+  ): TypedContractEvent<
+    EmergencyPriceResetEvent.InputTuple,
+    EmergencyPriceResetEvent.OutputTuple,
+    EmergencyPriceResetEvent.OutputObject
+  >;
   getEvent(
     key: "EmergencyWithdraw"
   ): TypedContractEvent<
@@ -509,6 +552,17 @@ export interface BalancerFlashLoanArb extends BaseContract {
   >;
 
   filters: {
+    "EmergencyPriceReset(uint256,uint256)": TypedContractEvent<
+      EmergencyPriceResetEvent.InputTuple,
+      EmergencyPriceResetEvent.OutputTuple,
+      EmergencyPriceResetEvent.OutputObject
+    >;
+    EmergencyPriceReset: TypedContractEvent<
+      EmergencyPriceResetEvent.InputTuple,
+      EmergencyPriceResetEvent.OutputTuple,
+      EmergencyPriceResetEvent.OutputObject
+    >;
+
     "EmergencyWithdraw(address,uint256)": TypedContractEvent<
       EmergencyWithdrawEvent.InputTuple,
       EmergencyWithdrawEvent.OutputTuple,

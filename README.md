@@ -1,236 +1,164 @@
 # Balancer Flash Loan Arbitrage Bot
 
-高度なMEV保護とリアルタイム監視機能を備えたBalancerフラッシュローンアービトラージボット。
+## 🛡️ **リスク管理システム搭載版**
 
-## 🚀 新機能
+包括的なリスク管理機能を搭載したBalancerフラッシュローンアービトラージボットです。
 
-### セキュリティ強化
-- **Slither静的解析**: Re-entrancy、Unchecked returnなどを自動検出
-- **Echidna Fuzzテスト**: 2000ステップのプロパティベーステスト
-- **feeAmount厳密チェック**: Balancer Vaultから実際の手数料率を取得して検証
-- **CI/CD統合**: GitHub Actionsで自動セキュリティチェック
+### 🚀 **クイックスタート**
 
-### MEV保護
-- **Flashbots統合**: Public mempoolを回避してMEV攻撃から保護
-- **失敗率大幅改善**: 30% → 5%に削減
-- **バンドル化**: フラッシュローン + 引き出しのアトミック実行
-
-### 型安全性
-- **Convict + YAML設定**: 型安全な設定管理システム
-- **Zod バリデーション**: 0x APIレスポンスの型安全性を保証
-- **想定外フィールド欠落**によるバグを防止
-
-### 高度な監視
-- **Prometheus メトリクス**: Net-Profit/h, Fail-Tx/h, Success Rate
-- **Redis外部キャッシュ**: 30秒TTLでAPI quota圧縮
-- **動的ガス価格上限**: eth_feeHistoryで過去20ブロック平均+1σ
-
-## 🛡️ セキュリティ機能
-
-### Must-have（実装済み）
-- ✅ **Slither --sarif 全 0**: 静的解析で脆弱性ゼロ
-- ✅ **Echidna re-entrancy fuzz**: 2000ステップのプロパティテスト
-- ✅ **feeAmount厳密チェック**: vault.getProtocolFeesCollector()で検証
-- ✅ **Mainnet実ガスプロファイル**: Hardhat tracerで最悪ケース対応
-
-### Nice-to-have（実装済み）
-- ✅ **動的ガス係数**: 環境別調整で機会損失抑制
-- ✅ **Flashbots MEV保護**: バンドル化でMEV攻撃防止
-- ✅ **Redis/LRU外部キャッシュ**: 横持ち再起動でrate-limit温存
-- ✅ **Prometheus監視**: TotalProfit, tx/sec, errorRate
-
-## 📋 環境変数
-
+1. **環境変数設定**
 ```bash
-# MEV保護
-FLASHBOTS_ENABLED=true
+# .envファイルを作成
+cp .env.example .env
 
-# 0x Protocol
-ZX_API_KEY=your_0x_api_key_here
-
-# Auto Withdrawal
-AUTO_WITHDRAW_ENABLED=false
-AUTO_WITHDRAW_THRESHOLD=1000
-
-# Redis Cache
-REDIS_ENABLED=true
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-# Metrics
-METRICS_ENABLED=true
-METRICS_PORT=3001
-METRICS_AUTH_USER=admin
-METRICS_AUTH_PASS=changeme
+# 必須項目を設定
+PRIVATE_KEY=0x...  # あなたのプライベートキー
+MAINNET_RPC=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+ZX_API_KEY=your_0x_api_key
 ```
 
-## 🔧 セットアップ
-
-```bash
-# 依存関係インストール
-npm install
-
-# セキュリティ解析
-npm run security:audit
-
-# Fuzzテスト
-npm run test:fuzz
-
-# ガスレポート
-npm run test:gas
-
-# 本番実行
-npm run start:production
-```
-
-## 🧪 テスト・監査
-
-### セキュリティ監査
-```bash
-# Slither静的解析
-npm run security:slither
-
-# Echidna re-entrancy テスト
-npm run security:echidna
-
-# 包括的監査
-npm run security:audit
-```
-
-### パフォーマンステスト
-```bash
-# 2000回Fuzzテスト
-npm run test:fuzz
-
-# ガス使用量レポート
-npm run test:gas
-
-# 統合テスト
-npm run test:integration
-```
-
-## 📊 監視・メトリクス
-
-### Prometheus メトリクス
-- `arbitrage_net_profit_per_hour_usd`: 時間当たり純利益
-- `arbitrage_failed_tx_per_hour`: 時間当たり失敗取引数
-- `arbitrage_success_rate_percent`: 成功率（%）
-- `arbitrage_gas_price_gwei`: 現在のガス価格
-- `arbitrage_opportunities_active`: アクティブな機会数
-
-### メトリクスサーバー起動
-```bash
-npm run metrics:start
-# http://localhost:3001/metrics でアクセス
-```
-
-## 🚀 本番運用
-
-### 設定ファイル（config.yaml）
-```yaml
-# ネットワーク設定
-network:
-  mainnet_rpc: "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
-  use_flashbots: true
-
-# 借入額設定（本番環境）
-amounts:
-  mainnet:
-    usdc: "50000" # 5万 USDC
-    weth: "15"    # 15 WETH
-
-# 利益設定
-profit:
-  mainnet:
-    min_percentage: 0.2
-    min_amount_usd: 100
-    gas_multiplier: 2.0
-```
-
-### 起動
-```bash
-# 本番環境で起動
-NODE_ENV=production npm run start:production
-```
-
-## 🔍 技術仕様
-
-### Solidityコントラクト
-- **Re-entrancy完全防止**: `nonReentrant`修飾子の多重適用
-- **feeAmount厳密検証**: Balancer実手数料率との照合
-- **EIP-1559対応**: baseFeeイベント出力で正確なガス費計算
-- **Graceful Degradation**: 価格フィード障害時のフォールバック
-
-### TypeScriptスキャナー
-- **動的ガス上限**: eth_feeHistory + 統計的手法
-- **Static-call シミュレーション**: revert理由デコード
-- **Flashbotsバンドル**: MEV保護 + 利益確定の同時実行
-- **Redis外部キャッシュ**: プロセス再起動耐性
-
-## 特徴
-
-- **Balancerフラッシュローン**: 手数料無料でトークンを借用
-- **0x Protocol統合**: 130+のDEXから最適価格を取得
-- **自動アービトラージ**: 利益機会を自動検出・実行
-- **ガス効率**: 最適化されたスマートコントラクト
-- **リアルタイム監視**: WebSocket接続でリアルタイム価格監視
-
-## 🚀 セットアップ
-
-### 1. 依存関係のインストール
+2. **依存関係インストール**
 ```bash
 npm install
 ```
 
-### 2. 環境変数の設定
-`.env`ファイルを作成：
+3. **コンパイル**
 ```bash
-# 0x Protocol API
-ZX_API_KEY=your_0x_api_key_here
-
-# Ethereum RPC
-ALCHEMY_WSS=wss://eth-mainnet.g.alchemy.com/v2/your_key_here
-
-# ウォレット設定
-PRIVATE_KEY=0x1234567890abcdef... # 66文字のプライベートキー
-
-# Flashbots設定
-FLASHBOTS_ENABLED=true
-
-# Redis設定（オプション）
-REDIS_ENABLED=true
-REDIS_HOST=localhost
-REDIS_PORT=6379
+npm run compile
 ```
 
-### 3. コントラクトのデプロイ
+4. **実行**
 ```bash
-npm run deploy
-```
+# リスク管理システム付きで実行
+npm run start
 
-### 4. ボットの起動
-```bash
-# 開発環境
+# または
 npm run scan
-
-# 本番環境
-npm run start:production
 ```
 
-## 📈 パフォーマンス
+### 🛡️ **リスク管理機能**
 
-- **ガス効率**: 平均350,000 gas/取引
-- **成功率**: 95%以上（Flashbots使用時）
-- **レスポンス時間**: 平均3秒以内
-- **利益率**: 0.2%以上（本番環境）
+#### **損失制限**
+- **日次最大損失**: $1,000
+- **時間最大損失**: $200
+- **連続失敗制限**: 3回で一時停止
+- **損失後クールダウン**: 5分間
 
-## 🔒 セキュリティ
+#### **リスク評価項目**
+1. ✅ **成功率監視** - 過去1時間の成功率30%以上
+2. ✅ **流動性チェック** - 最小$100k流動性要件
+3. ✅ **ガス価格制限** - 設定上限以下でのみ実行
+4. ✅ **利益マージン** - ガス代の3倍以上の利益確保
+5. ✅ **借入額制限** - $50k超の大口取引警告
+6. ✅ **価格インパクト** - スリッページ2%以下
 
-- **監査済み**: Slither + Echidna完全パス
-- **Re-entrancy防止**: 多重防御機構
-- **MEV保護**: Flashbots統合
-- **アクセス制御**: オーナー限定機能
+#### **アラート機能**
+- 🚨 **重要な警告** - コンソール + Slack通知
+- 📊 **大口機会** - $200超の利益機会を通知
+- ⚠️ **リスク警告** - 実行ブロック理由を表示
 
-## 📝 ライセンス
+### ⚙️ **設定オプション**
 
-MIT License - 商用利用可能
+#### **積極性レベル**
+```bash
+# 環境変数で調整
+AGGRESSIVENESS_LEVEL=1  # 保守的（3パス、15ブロック間隔）
+AGGRESSIVENESS_LEVEL=2  # バランス（6パス、8ブロック間隔）
+AGGRESSIVENESS_LEVEL=3  # 積極的（8パス、6ブロック間隔）
+```
+
+#### **自動引き出し**
+```bash
+AUTO_WITHDRAW_ENABLED=true
+AUTO_WITHDRAW_THRESHOLD=1000  # $1000で自動引き出し
+AUTO_WITHDRAW_TOKEN=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48  # USDC
+```
+
+#### **Slack通知**
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
+```
+
+### 📊 **メトリクス監視**
+
+```bash
+# メトリクスサーバー起動
+METRICS_ENABLED=true npm run start
+
+# Prometheusメトリクス確認
+curl http://localhost:3001/metrics
+```
+
+**利用可能メトリクス:**
+- `arbitrage_transactions_total` - 総取引数
+- `arbitrage_profit_usd_total` - 総利益（USD）
+- `arbitrage_success_rate_percent` - 成功率
+- `arbitrage_net_profit_per_hour_usd` - 時間当たり純利益
+- `arbitrage_failed_tx_per_hour` - 時間当たり失敗数
+
+### 🧪 **テスト実行**
+
+```bash
+# フォーク環境でテスト
+npm run test:fork
+
+# 基本テスト
+npm run test
+
+# セキュリティテスト
+npm run security:audit
+
+# ファズテスト
+npm run test:fuzz
+```
+
+### 🔒 **セキュリティ機能**
+
+- ✅ **Re-entrancy保護** - 完全なガード実装
+- ✅ **信頼できるスワップターゲット** - ホワイトリスト制御
+- ✅ **MEV保護** - Flashbots対応（オプション）
+- ✅ **価格フィード検証** - Chainlink + フォールバック
+- ✅ **ガス制限** - 動的上限設定
+
+### 📈 **パフォーマンス最適化**
+
+- ⚡ **API負荷軽減** - Rate limit対応
+- ⚡ **キャッシュシステム** - Redis + メモリキャッシュ
+- ⚡ **並列処理制限** - API乱用防止
+- ⚡ **ガス最適化** - 実績ベース見積もり
+
+### 🚨 **重要な注意事項**
+
+1. **プライベートキー管理**
+   - 絶対に公開しないでください
+   - 本番環境では環境変数として設定
+
+2. **資金管理**
+   - 小額から開始してください
+   - リスク制限を適切に設定
+
+3. **API制限**
+   - 0x API キーの取得が必要
+   - Rate limit内での使用を心がけ
+
+4. **ネットワーク設定**
+   - 安定したRPCプロバイダーを使用
+   - WebSocket接続の監視
+
+### 📞 **サポート**
+
+問題が発生した場合：
+
+1. **ログ確認** - コンソール出力をチェック
+2. **環境変数** - 設定値を再確認
+3. **ネットワーク** - RPC接続状態を確認
+4. **残高確認** - ETH残高が十分か確認
+
+### 🔄 **アップデート履歴**
+
+- **v0.2.0** - リスク管理システム実装
+- **v0.1.0** - 基本アービトラージ機能
+
+---
+
+**⚠️ 免責事項**: このソフトウェアは教育目的で提供されています。実際の取引での損失について、開発者は一切の責任を負いません。自己責任でご利用ください。
