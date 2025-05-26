@@ -69,29 +69,29 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 balanceBefore = cachedToken.balanceOf(address(this));
 
         // userDataから0x APIのスワップデータをデコード
-        // 新しい形式：[swapTarget1, swapData1, swapTarget2, swapData2]
+        // 新しい形式：[allowanceTarget1, swapData1, allowanceTarget2, swapData2]
         (
-            address swapTarget1,
+            address allowanceTarget1,
             bytes memory swapData1,
-            address swapTarget2,
+            address allowanceTarget2,
             bytes memory swapData2
         ) = abi.decode(userData, (address, bytes, address, bytes));
 
-        // 最初のスワップのためにPermit2への承認
+        // 最初のスワップのためにallowanceTargetへの承認
         require(
-            cachedToken.approve(PERMIT2_CONTRACT, cachedAmount),
+            cachedToken.approve(allowanceTarget1, cachedAmount),
             "Approval failed"
         );
 
         // 最初のスワップを実行（例：USDC → 中間トークン）
-        (bool success1, ) = swapTarget1.call(swapData1);
+        (bool success1, ) = allowanceTarget1.call(swapData1);
         if (!success1) revert SwapFailed();
 
         // 効率化：スワップ後に実際に受け取ったトークンのみを承認
-        _approveIntermediateTokens(cachedToken);
+        _approveIntermediateTokens(cachedToken, allowanceTarget2);
 
         // 2番目のスワップを実行（中間トークン → 元のトークン）
-        (bool success2, ) = swapTarget2.call(swapData2);
+        (bool success2, ) = allowanceTarget2.call(swapData2);
         if (!success2) revert SwapFailed();
 
         // スワップ後の残高
@@ -101,24 +101,33 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 minExpectedReturn = balanceBefore + (cachedAmount * 995) / 1000;
         if (balanceAfter < minExpectedReturn) revert InsufficientProfit();
 
-        // 利益があることを確認（Balancerは手数料無料）
-        if (balanceAfter <= balanceBefore + cachedAmount)
+        // 利益があることを確認
+        uint256 repayment = cachedAmount + feeAmount;
+        if (balanceAfter <= balanceBefore + repayment)
             revert InsufficientProfit();
 
-        // Balancer Vaultへ返済
+        // Balancer Vaultへ返済（元本 + 手数料）
         require(
-            cachedToken.transfer(address(vault), cachedAmount),
+            cachedToken.transfer(address(vault), repayment),
             "Transfer failed"
         );
 
         // 利益を計算してイベントを発行
-        uint256 profit = balanceAfter - (balanceBefore + cachedAmount);
-        emit FlashLoanExecuted(address(cachedToken), cachedAmount, 0, profit);
+        uint256 profit = balanceAfter - (balanceBefore + repayment);
+        emit FlashLoanExecuted(
+            address(cachedToken),
+            cachedAmount,
+            feeAmount,
+            profit
+        );
     }
 
     /// @notice 効率的な中間トークン承認
     /// @param borrowToken 借入トークン（承認対象外）
-    function _approveIntermediateTokens(IERC20 borrowToken) internal {
+    function _approveIntermediateTokens(
+        IERC20 borrowToken,
+        address allowanceTarget
+    ) internal {
         // 主要トークンのみをチェック（ガス効率化）
         address[5] memory majorTokens = [
             0x6B175474E89094C44Da98b954EedeAC495271d0F, // DAI
@@ -137,7 +146,7 @@ contract BalancerFlashLoanArb is IFlashLoanRecipient, Ownable, ReentrancyGuard {
             if (balance > 0) {
                 // 残高がある場合のみ承認（ガス効率化）
                 require(
-                    intermediateToken.approve(PERMIT2_CONTRACT, balance),
+                    intermediateToken.approve(allowanceTarget, balance),
                     "Intermediate approval failed"
                 );
                 break; // 最初に見つかった中間トークンのみ承認（通常は1つだけ）
