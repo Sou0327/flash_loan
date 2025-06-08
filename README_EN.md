@@ -18,7 +18,8 @@ This repository contains a proof-of-concept flash loan arbitrage bot designed fo
    ```bash
    npx hardhat compile
    ```
-3. Configure environment variables in `.env`
+3. Copy `.env.example` to `.env` and configure the variables
+
 4. Run the scanner
    ```bash
    npm run start
