@@ -1,5 +1,7 @@
 # Balancer Flash Loan Arbitrage Bot
 
+[English quick start guide](README_EN.md) is available.
+
 ## 🛡️ **リスク管理システム搭載版**
 
 包括的なリスク管理機能を搭載したBalancerフラッシュローンアービトラージボットです。
