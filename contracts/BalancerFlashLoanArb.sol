@@ -1,193 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// 必要なインターフェースを直接定義
-interface IERC20 {
-    function totalSupply() external view returns (uint256);
-    function balanceOf(address account) external view returns (uint256);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function allowance(
-        address owner,
-        address spender
-    ) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function transferFrom(
-        address from,
-        address to,
-        uint256 amount
-    ) external returns (bool);
-}
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-interface IVault {
-    function flashLoan(
-        address recipient,
-        IERC20[] memory tokens,
-        uint256[] memory amounts,
-        bytes memory userData
-    ) external;
-
-    function getProtocolFeesCollector()
-        external
-        view
-        returns (IProtocolFeesCollector);
-}
-
-interface IFlashLoanRecipient {
-    function receiveFlashLoan(
-        IERC20[] memory tokens,
-        uint256[] memory amounts,
-        uint256[] memory feeAmounts,
-        bytes memory userData
-    ) external;
-}
-
-interface IProtocolFeesCollector {
-    function getFlashLoanFeePercentage() external view returns (uint256);
-}
-
-// OpenZeppelin contracts
-abstract contract Context {
-    function _msgSender() internal view virtual returns (address) {
-        return msg.sender;
-    }
-}
-
-abstract contract Ownable is Context {
-    address private _owner;
-
-    event OwnershipTransferred(
-        address indexed previousOwner,
-        address indexed newOwner
-    );
-
-    constructor(address initialOwner) {
-        _transferOwnership(initialOwner);
-    }
-
-    modifier onlyOwner() {
-        _checkOwner();
-        _;
-    }
-
-    function owner() public view virtual returns (address) {
-        return _owner;
-    }
-
-    function _checkOwner() internal view virtual {
-        require(owner() == _msgSender(), "Ownable: caller is not the owner");
-    }
-
-    function _transferOwnership(address newOwner) internal virtual {
-        address oldOwner = _owner;
-        _owner = newOwner;
-        emit OwnershipTransferred(oldOwner, newOwner);
-    }
-}
-
-abstract contract ReentrancyGuard {
-    uint256 private constant _NOT_ENTERED = 1;
-    uint256 private constant _ENTERED = 2;
-    uint256 private _status;
-
-    constructor() {
-        _status = _NOT_ENTERED;
-    }
-
-    modifier nonReentrant() {
-        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
-        _status = _ENTERED;
-        _;
-        _status = _NOT_ENTERED;
-    }
-}
-
-abstract contract Pausable is Context {
-    event Paused(address account);
-    event Unpaused(address account);
-
-    bool private _paused;
-
-    constructor() {
-        _paused = false;
-    }
-
-    modifier whenNotPaused() {
-        _requireNotPaused();
-        _;
-    }
-
-    modifier whenPaused() {
-        _requirePaused();
-        _;
-    }
-
-    function paused() public view virtual returns (bool) {
-        return _paused;
-    }
-
-    function _requireNotPaused() internal view virtual {
-        require(!paused(), "Pausable: paused");
-    }
-
-    function _requirePaused() internal view virtual {
-        require(paused(), "Pausable: not paused");
-    }
-
-    function _pause() internal virtual whenNotPaused {
-        _paused = true;
-        emit Paused(_msgSender());
-    }
-
-    function _unpause() internal virtual whenPaused {
-        _paused = false;
-        emit Unpaused(_msgSender());
-    }
-}
-
-// Chainlink価格フィード
-interface AggregatorV3Interface {
-    function latestRoundData()
-        external
-        view
-        returns (
-            uint80 roundId,
-            int256 price,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        );
-}
-
-// SafeERC20の簡易実装（forceApprove用）
-library SafeERC20 {
-    function forceApprove(
-        IERC20 token,
-        address spender,
-        uint256 value
-    ) internal {
-        // 最初に0にリセット（USDT等対応）
-        if (value > 0 && token.allowance(address(this), spender) > 0) {
-            (bool resetSuccess, bytes memory resetData) = address(token).call(
-                abi.encodeWithSelector(token.approve.selector, spender, 0)
-            );
-            require(
-                resetSuccess &&
-                    (resetData.length == 0 || abi.decode(resetData, (bool))),
-                "Reset approval failed"
-            );
-        }
-
-        // 実際の承認
-        (bool success, bytes memory returndata) = address(token).call(
-            abi.encodeWithSelector(token.approve.selector, spender, value)
-        );
-        require(
-            success &&
-                (returndata.length == 0 || abi.decode(returndata, (bool))),
-            "Approval failed"
-        );
-    }
-}
+import "./interfaces/IVault.sol";
+import "./interfaces/IFlashLoanRecipient.sol";
+import "./interfaces/IProtocolFeesCollector.sol";
+import "./interfaces/AggregatorV3Interface.sol";
+import "./libraries/ForceApprove.sol";
 
 contract BalancerFlashLoanArb is
     IFlashLoanRecipient,
@@ -196,6 +20,7 @@ contract BalancerFlashLoanArb is
     Pausable
 {
     using SafeERC20 for IERC20;
+    using ForceApprove for IERC20;
 
     IVault private immutable vault;
 
